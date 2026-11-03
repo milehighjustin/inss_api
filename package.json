@@ -1,0 +1,30 @@
+{
+  "name": "inss-app-backend",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@azure/notification-hubs": "^2.1.0",
+    "@azure/storage-blob": "^12.34.0",
+    "@hono/node-server": "^2.1.3",
+    "bcryptjs": "^3.0.3",
+    "hono": "^4.13.14",
+    "jsonwebtoken": "^9.0.3",
+    "mongodb": "^7.7.0",
+    "puppeteer": "^25.16.0",
+    "qrcode": "^1.5.4",
+    "socket.io": "^4.8.4",
+    "web-push": "^3.6.7"
+  },
+  "devDependencies": {
+    "@types/jsonwebtoken": "^9.0.10",
+    "@types/node": "^26.1.1",
+    "@types/qrcode": "^1.5.6",
+    "@types/web-push": "^3.6.4",
+    "tsx": "^4.23.0",
+    "typescript": "^7.0.2"
+  }
+}

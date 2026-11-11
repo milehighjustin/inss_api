@@ -30,9 +30,9 @@ import {
 
 export const qrRoutes = new Hono()
 
-/** The links, built against the origin this request came in on. */
-function withLinks(code: QrCode, requestUrl: string) {
-  return { ...code, links: qrLinks(code.id, requestUrl) }
+/** The links: the app's addresses for this code, the same whatever host serves it. */
+function withLinks(code: QrCode) {
+  return { ...code, links: qrLinks(code.id) }
 }
 
 /** Only the fields the caller actually sent, so a partial save stays partial. */
@@ -59,7 +59,7 @@ qrRoutes.get('/', async (c) => {
   if (user instanceof Response) return user
 
   const codes = await qrCodes(c.req.query('includeInactive') === '1')
-  return c.json({ codes: codes.map((code) => withLinks(code, c.req.url)) })
+  return c.json({ codes: codes.map((code) => withLinks(code)) })
 })
 
 /** POST /api/mobile/admin/qr-codes   { name, url } */
@@ -71,7 +71,7 @@ qrRoutes.post('/', async (c) => {
 
   try {
     const code = await createQrCode(text(body.name), text(body.url))
-    return c.json({ code: withLinks(code, c.req.url) }, 201)
+    return c.json({ code: withLinks(code) }, 201)
   } catch (cause) {
     if (cause instanceof QrError) return fail(c, cause.message, cause.status)
     throw cause
@@ -128,7 +128,7 @@ qrRoutes.patch('/:codeId', async (c) => {
     })
 
     if (!code) return fail(c, 'That code is not there', 404)
-    return c.json({ code: withLinks(code, c.req.url) })
+    return c.json({ code: withLinks(code) })
   } catch (cause) {
     if (cause instanceof QrError) return fail(c, cause.message, cause.status)
     if (cause instanceof TagError) return fail(c, cause.message, cause.status)
@@ -170,7 +170,7 @@ qrRoutes.get('/:codeId/svg', async (c) => {
   const user = await requireAdmin(c)
   if (user instanceof Response) return user
 
-  const svg = await qrCodeSvg(c.req.param('codeId'), c.req.url)
+  const svg = await qrCodeSvg(c.req.param('codeId'))
   if (!svg) return fail(c, 'That code is not there', 404)
 
   return c.json({ svg })
@@ -186,7 +186,7 @@ qrRoutes.get('/:codeId/image', async (c) => {
   const user = await requireAdmin(c)
   if (user instanceof Response) return user
 
-  const svg = await qrCodeSvg(c.req.param('codeId'), c.req.url)
+  const svg = await qrCodeSvg(c.req.param('codeId'))
   if (!svg) return fail(c, 'That code is not there', 404)
 
   return c.body(svg, 200, {

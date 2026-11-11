@@ -38,7 +38,7 @@ loader; a deployed process takes its variables from the host.
 | `encryptionKey` | sealing the QuickBooks tokens at rest — the same key and scheme the existing ones were sealed with |
 | `googleClientEmail`, `googlePrivateKey` | the service account the console's photo tool uploads with (v1's names); `GOOGLE_DRIVE_SUBJECT` and `GOOGLE_DRIVE_PHOTO_FOLDER` override the impersonated account and the destination folder |
 | `KIOSK_PUBLIC_BASE_URL` | the public origin a kiosk's `kioskUrl` is built from (default `https://app.inselfstorage.com`) |
-| `QR_PUBLIC_BASE_URL` | the origin printed QR codes encode; defaults to `API_URL`, then the request's own origin, so a deployed API answers with itself |
+| `QR_PUBLIC_BASE_URL` | the origin printed QR codes encode — the **app's** host, defaulting to `https://app.inselfstorage.com`. It is never taken from `API_URL` or from the request, so a code drawn by a deployed API still points at the app. Set it only to override: a local build talking to a local app, or a second hostname |
 | `CRON_SECRET` | the bearer secret the four `/api/cron/*` endpoints require; with none set they all answer 401 |
 | `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY` | what browsers subscribe with and what signs every browser send. Browsers are pushed by this service alone, so the pair lives here and nowhere else. Generate with `node -e "console.log(require('web-push').generateVAPIDKeys())"` and never regenerate: a new pair invalidates every existing subscription. Without them scans are still recorded and nobody is told |
 | `VAPID_SUBJECT` | the contact in the VAPID header, a `mailto:` or URL (default `mailto:support@inselfstorage.com`) |

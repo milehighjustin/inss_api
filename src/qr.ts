@@ -139,32 +139,22 @@ function codeFromRow(row: QrDocument): QrCode {
 }
 
 /**
- * Where the public pages live.
+ * Where the public pages live: the app, never this service.
  *
- * `QR_PUBLIC_BASE_URL` wins and must be the app's public origin — that is the
- * hostname a printed code encodes, and the only one that should ever be drawn.
- * Failing that it falls back to `API_URL`, then the request's own origin (so a
- * local build draws codes that point at itself), then the v1 host that codes
- * printed before this service carry.
+ * A code encodes one hostname, and that hostname has to be the app's — `/qr/:id`
+ * and `/qr/:id/kiosk` are the app's routes. It must not come from `API_URL` or
+ * from the request's own origin: behind a proxy those are the API's host, so a
+ * code drawn there sends a phone to the API (and breaks again the day the API
+ * moves). `QR_PUBLIC_BASE_URL` overrides it — a local build, or a second
+ * hostname — and the default is the host printed signs already carry.
  */
-export function qrBaseUrl(requestUrl?: string): string {
-  const configured = (process.env.QR_PUBLIC_BASE_URL ?? process.env.API_URL ?? '').replace(/\/+$/, '')
-  if (configured) return configured
-
-  if (requestUrl) {
-    try {
-      return new URL(requestUrl).origin
-    } catch {
-      // Not a URL: fall through to the host printed codes already use.
-    }
-  }
-
-  return 'https://app.inselfstorage.com'
+export function qrBaseUrl(): string {
+  return (process.env.QR_PUBLIC_BASE_URL ?? 'https://app.inselfstorage.com').replace(/\/+$/, '')
 }
 
 /** The address a code resolves to, and the page that displays it. */
-export function qrLinks(id: string, requestUrl?: string): { code: string; kiosk: string } {
-  const base = qrBaseUrl(requestUrl)
+export function qrLinks(id: string): { code: string; kiosk: string } {
+  const base = qrBaseUrl()
   return { code: `${base}/qr/${id}`, kiosk: `${base}/qr/${id}/kiosk` }
 }
 
@@ -373,12 +363,12 @@ export async function updateQrCode(id: string, patch: QrCodePatch): Promise<QrCo
  * Drawn here rather than in the app so the file is identical whichever platform
  * prints it, and so the image is generated from the id the public page reads.
  */
-export async function qrCodeSvg(id: string, requestUrl?: string): Promise<string | null> {
+export async function qrCodeSvg(id: string): Promise<string | null> {
   const global = await db('global')
   const row = await global.collection<QrDocument>('qr').findOne({ _id: id })
   if (!row) return null
 
-  return QRCode.toString(qrLinks(id, requestUrl).code, {
+  return QRCode.toString(qrLinks(id).code, {
     type: 'svg',
     errorCorrectionLevel: 'H',
     margin: 2,

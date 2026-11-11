@@ -65,7 +65,7 @@ qrPublicRoutes.post('/:codeId/scan', async (c) => {
  * display for a code that does not exist has nothing useful to show.
  */
 qrPublicRoutes.get('/:codeId/svg', async (c) => {
-  const svg = await qrCodeSvg(c.req.param('codeId'), c.req.url)
+  const svg = await qrCodeSvg(c.req.param('codeId'))
 
   if (!svg) {
     return c.json({ error: 'QR code not found' }, 404)

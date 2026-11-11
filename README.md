@@ -40,10 +40,10 @@ loader; a deployed process takes its variables from the host.
 | `KIOSK_PUBLIC_BASE_URL` | the public origin a kiosk's `kioskUrl` is built from (default `https://app.inselfstorage.com`) |
 | `QR_PUBLIC_BASE_URL` | the origin printed QR codes encode; defaults to `API_URL`, then the request's own origin, so a deployed API answers with itself |
 | `CRON_SECRET` | the bearer secret the four `/api/cron/*` endpoints require; with none set they all answer 401 |
-| `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY` | signing desktop alerts (web push). Generate once with `node -e "console.log(require('web-push').generateVAPIDKeys())"`; without them scans are still recorded and nobody is told |
+| `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY` | what browsers subscribe with and what signs every browser send. Browsers are pushed by this service alone, so the pair lives here and nowhere else. Generate with `node -e "console.log(require('web-push').generateVAPIDKeys())"` and never regenerate: a new pair invalidates every existing subscription. Without them scans are still recorded and nobody is told |
 | `VAPID_SUBJECT` | the contact in the VAPID header, a `mailto:` or URL (default `mailto:support@inselfstorage.com`) |
 | `NOTIFY_DEBOUNCE_SECONDS` | the quiet window after a QR code's alert: further scans inside it are recorded but not sent (default 60, `0` turns it off) |
-| `AZURE_NOTIFICATION_HUB_CONNECTION_STRING`, `AZURE_NOTIFICATION_HUB_NAME` | phone push: the hub installations are written to and sends go through. APNs and FCM credentials live in the hub, not here. Without them devices are still remembered, and a delivery says nothing could be reached |
+| `AZURE_NOTIFICATION_HUB_CONNECTION_STRING`, `AZURE_NOTIFICATION_HUB_NAME` | push: the hub installations (phones and browsers) are written to and sends go through. APNs, FCM and the VAPID pair live in the hub, not here. Without them devices are still remembered, and a delivery says nothing could be reached |
 | `CUBBY_API_KEY` | Cubby's API: rent roll, pricing groups, aged receivables and each facility's activity |
 | `CUBBY_BQ_KEY` | base64 service-account JSON for the Cubby warehouse (BigQuery), used for the facility list |
 | `INTUIT_REDIRECT_URI` | overrides the QuickBooks callback URL (defaults to `API_URL` + `/admin/integration/intuit/oauth`) |
@@ -105,7 +105,7 @@ magic-link landing page, which is HTML for a browser.
 | `GET /api/mobile/admin/qr-codes/:codeId/svg` | admin | `{ svg }` — the drawing as markup, for a native SVG renderer. |
 | `GET /api/mobile/admin/qr-codes/:codeId/image` | admin | The same drawing as `image/svg+xml`, for a browser. |
 | `GET /api/mobile/notifications/devices` | bearer | `{ devices }` — the phones this account has alerts on. |
-| `POST /api/mobile/notifications/installations` | bearer | `{ installationId, platform: 'ios' \| 'android', pushChannel, appVersion?, deviceLabel? }` → `{ installation, synced }`. The tags come from the account, never from the device, so nobody can subscribe themselves to a tag. |
+| `POST /api/mobile/notifications/installations` | bearer | `{ installationId, platform: 'ios' \| 'android' \| 'macos' \| 'windows', pushChannel, appVersion?, deviceLabel? }` → `{ installation, synced }`. The tags come from the account, never from the device, so nobody can subscribe themselves to a tag. A macOS or Windows build registers here too: macOS is an APNs token, Windows a WNS channel URI. |
 | `DELETE /api/mobile/notifications/installations/:installationId` | bearer | `{ deleted }`; only the caller's own. |
 | `GET /api/mobile/admin/notification-tags` | admin | `{ tags }` with how many accounts and codes use each. There are no predefined tags — the registry starts empty and everything in it was created here. |
 | `POST /api/mobile/admin/notification-tags` | admin | `{ label, description? }` → `{ tag }`; the slug is derived from the label. |
@@ -116,9 +116,9 @@ magic-link landing page, which is HTML for a browser.
 | `GET /api/mobile/admin/notifications/preview?tags=` | admin | `{ users, devices }` — the audience a send would reach. |
 | `POST /api/mobile/admin/notifications/send` | admin | `{ tags, title, body?, priority }` → `{ notification }`. |
 | `GET /api/mobile/push/key` | bearer | `{ publicKey }` — the VAPID key a browser subscribes with; `null` when the server has no keys yet. |
-| `POST /api/mobile/push/subscribe` | bearer | `{ endpoint, keys: { p256dh, auth }, device? }` → `{ subscription }`. Upsert: the same browser subscribing again updates one row, and a browser signing in as someone else moves its alerts to them. |
+| `POST /api/mobile/push/subscribe` | bearer | `{ endpoint, keys: { p256dh, auth }, device? }` → `{ subscription }`. Upsert into `global.pushSubscriptions`; no hub registration, because this service sends to browsers itself. The same browser subscribing again updates one row, and a browser signing in as someone else moves its alerts to them. |
 | `POST /api/mobile/push/unsubscribe` | bearer | `{ endpoint }` → `{ deleted }`; only the caller's own subscriptions. |
-| `POST /api/mobile/push/test` | bearer | `{ sent }` — one loud alert to the caller's own browsers, so "are alerts working?" has an answer that does not need a scan. |
+| `POST /api/mobile/push/test` | bearer | `{ sent, browser, phone }` — one loud alert to the caller's own devices, phones and browsers, so "are alerts working?" has an answer that does not need a scan. |
 | `POST /api/mobile/qr/:codeId/scan` | — | `{ url, live, name }` — where a code resolves right now, and the point at which a scan is recorded. Unknown or deactivated answers the fallback destination, not an error. |
 | `GET /api/mobile/qr/:codeId/svg` | — | The code drawn as SVG. `404` for an id that does not exist. |
 | `GET /api/mobile/admin/rtc/devices` | admin | `{ devices }` — active kiosk devices, by name, each with its `kioskUrl`. |
@@ -213,7 +213,7 @@ curl -fsS -H "Authorization: Bearer $CRON_SECRET" https://<api-host>/api/cron/qu
 | `/api/cron/cubby` | 08:30 | Reads the Cubby warehouse and API into `cubbyRentRoll`, `cubbyPricingGroups` and `cubbyAgedReceivables`, and creates a location for any facility that has none. |
 | `/api/cron/cubby-process` | 10:30 | Turns those three tables into one `statistics` block per facility. |
 | `/api/cron/roles` | by hand | Keeps the `investor` role in step with the `investors` records. |
-| `/api/cron/notifications-sync` | hourly | Retries the push installations the hub refused and prunes devices unseen for 90 days. |
+| `/api/cron/notifications-sync` | hourly | Retries the phone installations the hub refused, and prunes anything unseen for 90 days — phone devices and browser subscriptions alike. |
 
 Run `cubby` before `cubby-process`; the process step refuses to start on an
 empty staging table rather than writing zeros over the portfolio. Both stages
@@ -288,44 +288,56 @@ it; answering opens the code it came from. Quiet alerts are notification-only,
 and kiosk devices are never rung.
 
 **Delivery** is the one `deliver()` seam in `src/notifications.ts`, and it sends
-to every device the tagged accounts have turned alerts on in — browsers directly,
-phones through the hub. The outcome is written
-back onto the row: `delivered` with a count, `pending` when nobody who should be
-told has alerts on yet, `failed` when the push service refused — with the reason
-in `note`, so an empty tray is explained rather than mysterious. A delivery
-problem never blocks the redirect, and the row is the record of what happened.
+to every device the tagged accounts have turned alerts on in — phones through the
+hub, browsers directly. The outcome is written back onto the row: `delivered`
+with a count, `pending` when nobody who should be told has alerts on yet, `failed`
+when the push service refused — with the reason in `note`, so an empty tray is
+explained rather than mysterious. A delivery problem never blocks the redirect,
+and the row is the record of what happened.
 
-**Desktop is web push**, and it is what Windows, macOS and Linux run
-(`src/push/browser.ts`). The web build subscribes once through a service worker
-(`inss-support/public/sw.js`); this service keeps `{ endpoint, keys }` in
-`global.pushSubscriptions` against the signed-in user and encrypts one payload per
-subscription on send. The browser does not have to be open — its push service
-wakes the worker — and nothing has to be installed. `priority` decides how it
-arrives: `loud` is a notification with a sound that waits to be dismissed, `quiet`
-is one that is there when you look.
+**Browsers are pushed by this service** (`src/push/browser.ts`), which is what
+Windows, macOS and Linux run. The web build subscribes once through a service
+worker (`inss-support/public/sw.js`); this service keeps `{ endpoint, keys }` in
+`global.pushSubscriptions` against the signed-in user and sends to each
+subscription with `web-push`. There is no hub in that path: the endpoint *is* the
+delivery address, so registering it as an installation would only add a copy to
+keep in sync. A scan is addressed to the people it resolved, so a browser alert is
+one request per subscription and nobody has to be filtered out afterwards. The
+browser does not have to be open — its push service wakes the worker — and
+nothing has to be installed. `priority` decides how it arrives: `loud` is a
+notification with a sound that waits to be dismissed, `quiet` is one that is there
+when you look.
 
-It is the Web Push protocol rather than Notification Hubs' browser platform on
-purpose: that platform excludes Safari, and Safari 16 on macOS Ventura or later
-receives standard web push. One sender covers Chrome and Edge on Windows,
-Chrome, Firefox and Safari on macOS, and Chrome and Firefox on Linux.
+Every browser family takes that path, Safari included: Apple's Web Push
+(`web.push.apple.com`) speaks the same protocol, so one sender and one payload
+shape cover Chrome, Edge, Firefox and Safari. `src/push/payload.ts` builds it, and
+the pair in `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` is the only key involved —
+the app subscribes with the public half, this service signs with the private one.
 
-**Phones go through the hub** (`src/push/hub.ts`). Each app install registers its
-APNs or FCM token — not an Expo push token — with the tags its account carries,
-prefixed `nt:<slug>` and `user:<id>`. A send is two requests against the same tag
-expression, one APNs and one FCM v1, because the SDK builds a single-platform
-message; loud becomes `sound: default` + `interruption-level: time-sensitive` +
+**The native apps go through the hub** (`src/push/hub.ts`) — phones, and the same
+app built for macOS or Windows. Each install registers its APNs token, FCM token
+or WNS channel URI — not an Expo push token — with the tags its account carries,
+prefixed `nt:<slug>` and `user:<id>`. A send is one request per platform — Apple
+(iOS and macOS share it), FCM v1, WNS — because the SDK builds a single-platform
+message, and only the platforms the audience actually has are attempted;
+loud becomes `sound: default` + `interruption-level: time-sensitive` +
 the `alerts-loud` Android channel, quiet becomes silent and `passive` on the
-`alerts-quiet` channel. Those two channels are created by the app before it
-prompts, because Android 13 will not show the permission dialog without one and
-a channel's importance cannot be changed afterwards.
+`alerts-quiet` channel. On Windows a send is toast XML instead of JSON:
+`scenario="urgent"` plus a sound for loud, silent `audio` for quiet, and a
+`launch="inssappv2://…"` that opens the app on the scanned code. Those two Android
+channels are created by the app before it prompts, because Android 13 will not
+show the permission dialog without one and a channel's importance cannot be
+changed afterwards.
 
 **Tags are what make most of this addressable.** `global.notificationTags` is the
 registry (`/admin/notifications`); `users.notificationTags` is who hears what;
 `GET /api/mobile/auth/session` carries them so the app knows on sign-in whether
 to ask for permission at all. Changing a person's tags rewrites every device they
-have, since the hub routes by the tags on the installation: until that write
-succeeds, the hub still sends by the old set. `GET /api/cron/notifications-sync`
-retries whatever the hub refused and forgets devices unseen for 90 days.
+have, since the hub routes the phones by the tags on their installations: until
+that write succeeds, the hub still sends those phones by the old set. Browsers
+need no such write — a scan addresses them by the audience it resolved, so a tag
+change reaches them on the next alert. `GET /api/cron/notifications-sync` retries
+whatever the hub refused and forgets anything unseen for 90 days.
 
 **Documents are addressed to people, not tags.** Uploading a file in Admin →
 Investor Portal → Documents can tell the investors who can see it that it was

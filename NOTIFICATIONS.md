@@ -1,8 +1,9 @@
 # Notifications
 
-How push notifications work: tags on users, an installation per device, QR codes
-that name tags, and Azure Notification Hubs delivering to phones while web push
-covers browsers.
+How push notifications work: tags on users, QR codes that name tags, and two
+transports that each do what the other cannot — Azure Notification Hubs for the
+phones, which hold tokens only Azure's APNs and FCM credentials can use, and this
+service pushing straight to each browser subscription, which needs no hub at all.
 
 **Status: built.** The registry, user tags, QR tag pickers, installations,
 both delivery channels, the admin console and the reconcile cron are in place.
@@ -28,7 +29,8 @@ app, scheduled or recurring notifications, and critical alerts (needs Apple's
 separate entitlement).
 
 Desktop is no longer a non-goal — it is built. Windows, macOS and Linux are
-served by **web push**, which is not Azure: see [Desktop](#desktop-windows-macos-and-linux).
+served by this service pushing straight to each browser's subscription; Azure is
+not in that path at all: see [Desktop](#desktop-windows-macos-and-linux).
 
 ## Vocabulary
 
@@ -36,35 +38,45 @@ served by **web push**, which is not Azure: see [Desktop](#desktop-windows-macos
 | --- | --- |
 | Notification tag | A stable slug in a registry, e.g. `support`. Assigned to users; chosen by QR codes. |
 | Audience tag | The wire form of a notification tag: `nt:<slug>`. This is what an installation carries. |
-| Installation | One app install on one device, identified by a UUID the device generates once. Holds the push token and its tags. |
-| Push channel | The raw APNs token (iOS) or FCM registration token (Android). Not an Expo push token. |
+| Installation | One native app install, as Azure knows it — a phone, or the app built for macOS or Windows. It names itself with a UUID it generates once. Browsers are *not* installations — see [Desktop](#desktop-windows-macos-and-linux). |
+| Push channel | The raw APNs token (iOS, macOS), FCM registration token (Android), or WNS channel URI (Windows). Not an Expo push token. |
 | Loud / quiet | How the alert arrives. Loud: sound + time-sensitive delivery. Quiet: visible, silent, no wake. |
 
 ## How it travels
 
 ```
-Admin assigns tags ──► users.notificationTags ──► re-sync each installation
+Admin assigns tags ──► users.notificationTags ──► re-sync each phone installation
                                                         │
 QR scan ──► notification record (tags, title, body, priority)
                         │
                         ▼
-              tag expression  nt:support || nt:accounting
+              tags resolved to people (and named recipients)
                         │
-             ┌──────────┴──────────┬────────────────────┐
-        APNs send             FCM v1 send          web push send
-      (Apple devices)      (Android devices)    (browsers: Windows,
-                                                  macOS, Linux)
+             ┌──────────┴──────────────────────────────┐
+      APNs send                                 one web push send
+      FCM v1 send                               per subscription
+      WNS send                              (Chrome, Edge, Firefox and Safari
+   (iPhone/Mac, Android, Windows           on Windows/macOS/Linux, sent by this
+    by tag expression, via Azure —         service — no Azure in the path)
+    only the platforms in the audience)
 ```
 
-Two important facts from the Azure SDK that shape everything:
+Three important facts that shape everything:
 
-1. A send is **one platform per request**. `createAppleNotification` and
-   `createFcmV1Notification` are separate messages, so every alert is two sends
-   against the same tag expression. (Templates could collapse them, but templates
-   put the payload shape in the installation instead of the code, which is worse
-   for us.)
-2. Routing is by the **tags stored on the installation**, not by a query at send
-   time. So a user's tags only take effect once their installations are updated.
+1. A hub send is **one platform per request**. Apple, FCM v1 and WNS are
+   separate messages, so every alert is up to three sends against the same tag
+   expression — and only the ones the audience has a device for.
+   (Templates could collapse them, but templates put the payload shape in the
+   installation instead of the code, which is worse for us.)
+2. **The two paths are addressed differently, on purpose.** Phones are routed by
+   the tags stored on their installations, so a tag change only takes effect once
+   those are updated. Browsers are addressed by the audience the scan already
+   resolved — the same list the in-app ring used — so a tag change reaches them on
+   the next alert with nothing to sync, and somebody on a call is simply not in
+   the list.
+3. **Azure serves the native apps only.** Anything a browser needs is one HTTP
+   call to an endpoint we already hold, so the hub would add a registration to
+   maintain and nothing else. That is why `hub.ts` has no browser code.
 
 ## Desktop: Windows, macOS and Linux
 
@@ -79,21 +91,54 @@ its web target is the desktop app. That has one consequence worth stating: push
 arrives through the **browser's** push service, so the browser must be installed,
 but it does not have to be running.
 
-### Why web push and not Notification Hubs
+### How a browser is routed
 
-Notification Hubs does have a `browser` platform, it is GA, and it is standard
-web push. Its documentation excludes Safari, though — *"Apple Safari isn't
-included"* — and macOS users include Safari 16 on Ventura or later, which does
-speak standard web push. Routing desktop through the hub would therefore either
-lose Safari or need a second sender for it.
+It is not routed — it is **sent to**. `push/browser.ts` holds every subscription
+as `{ endpoint, keys }`, and a scan hands it the list of people to tell; it then
+makes one `web-push` call per subscription (RFC 8030/8291/8292, VAPID). Chrome,
+Edge, Firefox, Safari on macOS and Safari on iOS all take that same path, because
+Apple's `web.push.apple.com` speaks standard web push.
 
-So desktop is sent directly: `web-push` (RFC 8030/8291/8292, VAPID) from this
-backend. One code path covers Chrome and Edge on Windows; Chrome, Firefox and
-Safari on macOS; and Chrome and Firefox on Linux. The hub keeps the phone
-platforms, where it does the useful work of holding APNs and FCM credentials.
+There is deliberately no hub in it. Azure's Browser platform would have meant an
+installation per browser to create, re-create when the account's tags changed, and
+repair when a write failed — all to reach an address we already store, for a
+client whose audience the scan has already resolved. The hub earns its place on
+the phones, where it holds the APNs and FCM credentials this service cannot use
+itself.
 
-Tags are not lost by this: a browser subscription lives in our own collection, so
-routing by tag is a query here rather than an installation update in Azure.
+Everything else about browsers is shared with the phones: the message, the
+audience, the loud/quiet rules, and the exclusion applied to anyone on a call.
+
+### The native builds: macOS and Windows
+
+The same app, built with `react-native-macos` or `react-native-windows`, registers
+as platform `macos` or `windows` through the ordinary installation endpoint, and
+receives its alerts through the hub exactly as a phone does:
+
+- **macOS is APNs.** Apple's push service carries macOS and iOS alike, so it is
+the same leg, the same payload and the same reasoning as an iPhone — no second
+sender to build or keep working.
+- **Windows is WNS**, whose messages are toast XML rather than JSON. Loud sets
+`scenario="urgent"` (breaks through Focus Assist) with the default notification
+sound; quiet is `audio silent="true"` with no scenario. Both carry a
+`launch="inssappv2://…"` pointing at the path a browser alert would use, so a
+click opens the app on the code that was scanned.
+
+Two Azure constraints, both configuration rather than code:
+
+1. **WNS credentials live on the hub** — the Windows Store app's Package SID and
+   client secret — the same way APNs and FCM credentials do. Until they are there,
+   a `wns` send is refused with an authorization error and the log records it.
+2. **One APNs credential per hub, and it names a bundle id.** iOS and macOS are
+   different apps with different bundle ids, so a native macOS build needs its own
+   hub (or the iOS app's hub, if the macOS one adopts the same bundle id, which
+   App Store rules will not allow for the same app). This is the one place where
+   "just add a platform" is not enough.
+
+A send only attempts the platforms the audience actually has: `platformsFor()`
+reads the distinct platforms of the people being told, so a broadcast to a
+Windows-free team does not make a WNS request, and a hub missing a platform's
+credentials only shows up once somebody actually has that device.
 
 ### What a browser needs
 
@@ -105,12 +150,14 @@ routing by tag is a query here rather than an installation update in Azure.
    a user gesture, and Chrome penalises origins that ask outside one. So the
    prompt is raised by the Account button, never on launch — the same policy as
    the phones.
-4. **A VAPID key pair**, the private half on the server and the public half in the
-   browser. They must be the same pair or the push service rejects every send.
+4. **A VAPID key pair in this service's environment.** The browser subscribes
+   with the public half and this service signs with the private one — the only
+   sender. Nothing else holds the pair, so there is nothing to keep in step with
+   Azure.
 
 ### Storage
 
-`global.pushSubscriptions`, one row per browser:
+`global.pushSubscriptions`, one row per browser, and the only copy there is:
 
 ```ts
 { _id: string         // sha256(endpoint) — the same browser subscribing again
@@ -125,8 +172,16 @@ routing by tag is a query here rather than an installation update in Azure.
 
 Indexes: `_id` (primary), `userId`.
 
-A `404` or `410` from a push service means the browser is gone (uninstalled,
-permission revoked): the row is deleted rather than retried forever.
+No tags and no sync state: the row is used exactly as written, and routing comes
+from the audience the scan resolved. The app posts on every enable and every
+launch where it already has a subscription, so signing in as someone else on the
+same browser moves the alerts to that person; deactivating an account removes the
+browsers with the phones.
+
+A `404` or `410` from a push endpoint means the browser is gone (uninstalled,
+permission revoked, profile deleted): the row is deleted rather than retried
+forever. Anything older than ninety days without a re-registration is pruned by
+the notifications-sync cron.
 
 ### Payload
 
@@ -227,12 +282,26 @@ node -e "console.log(require('web-push').generateVAPIDKeys())"
 | `VAPID_PRIVATE_KEY` | signing — never leaves the server |
 | `VAPID_SUBJECT` | the contact in the VAPID header: a `mailto:` or URL (default `mailto:support@inselfstorage.com`) |
 
-Generate the pair once and keep it. A new pair invalidates every existing
-subscription, and the browsers have to turn alerts on again.
+Generate the pair once and keep it. These three variables are the whole story:
+this service is the only sender to browsers, so there is no second copy to match
+and no blade to keep in step. A new pair invalidates every existing subscription
+— the browser accepts a push only from the key its subscription was made under —
+and everyone has to turn alerts on again.
+
+The subject is **not** part of the pair: it is a contact address the push service
+can use to reach whoever runs this app if its traffic is a problem, so it has to
+read as a URI — `mailto:someone@example.com` or `https://…`. A display name is not
+one, and a sender whose subject does not parse is refused by the push service
+rather than corrected. Changing it invalidates nothing, so it can be edited
+whenever.
+
+The notification hub's **Browser (Web Push)** blade is no longer used. It can be
+left empty: nothing in this system sends a browser alert through Azure.
 
 ### Known edges
 
-- **Safari on macOS** needs Ventura and Safari 16, and revokes a site's push
+- **Safari on macOS** takes the same direct path as every other browser, and it
+  needs Ventura and Safari 16. It revokes a site's push
   permission if a push arrives and no notification is shown — so the worker must
   always call `showNotification`, which is why `userVisibleOnly: true` is not just
   a formality. Safari also ignores `icon`, `image` and `actions`, and its earlier
@@ -283,8 +352,8 @@ Our record of what we have registered. Notification Hubs holds the routing copy.
 ```ts
 { _id: string            // installation UUID generated on the device
   userId: string
-  platform: 'ios' | 'android'
-  pushChannel: string    // APNs / FCM token
+  platform: 'ios' | 'android' | 'macos' | 'windows'
+  pushChannel: string    // APNs / FCM token, or a WNS channel URI
   tags: string[]         // materialised: ['user:<id>', 'nt:support', …]
   appVersion?: string
   deviceLabel?: string
@@ -313,8 +382,8 @@ The delivery log. Existing rows keep their shape; new rows add:
   tags: string[]            // slugs targeted (empty for a document)
   legacypeople?: string[]   // old notifyUserIds, still honoured
   expression: string        // what was actually sent
-  sends: { platform: 'apns' | 'fcmv1', trackingId?, notificationId?,
-           ok: boolean, error?: string }[]
+  sends: { platform: 'apns' | 'fcmv1' | 'wns' | 'browser', trackingId?,
+           notificationId?, ok: boolean, error?: string }[]
   createdBy?: string        // userId for manual sends
   status: 'pending' | 'delivered' | 'failed' | 'suppressed' | 'no-audience'
   note?: string             // what happened, in a sentence
@@ -389,7 +458,7 @@ existing notification fields.
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `GET` | `/api/cron/notifications-sync` | Re-push installations whose `tagsSyncedAt` is stale or whose `syncError` is set; prune installations the hub no longer knows. |
+| `GET` | `/api/cron/notifications-sync` | Re-push phone installations whose `tagsSyncedAt` is stale or whose `syncError` is set, and prune what nobody has opened in 90 days — devices and browser subscriptions alike. |
 | `POST` | `/api/cron/notifications/send` | Send by tag from a scheduler (smoke tests, future automations). |
 
 ## The app
@@ -528,6 +597,21 @@ Loud (Android, FCM v1):
 Quiet is the same with no sound, `interruption-level: passive`,
 `apns-priority: 5`, `channel_id: alerts-quiet`, `"priority": "normal"`.
 
+Loud (Windows, WNS toast):
+
+```xml
+<toast activationType="foreground" launch="inssappv2:///admin/qr" scenario="urgent">
+  <visual><binding template="ToastGeneric">
+    <text>…</text><text>…</text>
+  </binding></visual>
+  <audio src="ms-winsoundevent:Notification.Default"/>
+</toast>
+```
+
+Quiet drops `scenario` and uses `<audio silent="true"/>`. Every value is
+XML-escaped, and the body is sent as `application/xml` with `X-WNS-Type:
+wns/toast`.
+
 What "loud" can and cannot do: iOS will still respect the mute switch and Focus;
 `time-sensitive` only lets it break through Focus, not the hardware switch.
 Android respects Do Not Disturb. Truly overriding both needs Apple's Critical
@@ -539,11 +623,14 @@ worth telling support staff so expectations are right.
 `src/push/hub.ts` wraps the client:
 
 - `registerInstallation({ installationId, platform, pushChannel, tags })` —
-  `createAppleInstallation` / `createFcmV1Installation` +
-  `createOrUpdateInstallation`.
+  `createAppleInstallation` (`ios`, `macos`) / `createFcmV1Installation`
+  (`android`) / `createWindowsInstallation` (`windows`) +
+  `createOrUpdateInstallation`. The platform the app reported decides it, never
+  the shape of the token.
 - `deleteInstallation(id)`.
-- `send(expression, { title, body, priority, data })` — one APNs send, one FCM v1
-  send, both against the expression; returns both tracking IDs.
+- `send(expression, { title, body, priority, data }, { platforms })` — an APNs
+  send, an FCM v1 send and a WNS send against the expression, minus the platforms
+  the audience does not have; each accepted send returns a tracking ID.
 
 `deliver()` in `notifications.ts` calls it and writes the log row. A scan awaits
 the send (bounded by a timeout) so the record is complete before the scan
@@ -733,10 +820,10 @@ New Admin section **Notifications** (next to Users / KPI / Investor / Kiosk / QR
 
 ## Build order
 
-0. **Desktop** — done: `web-push`, the subscription store and routes, the service
-   worker, the Account block. Prove with the Account test alert on Chrome or Edge
-   on Windows and on Safari or Chrome on macOS, then a scan of a code that names
-   you.
+0. **Desktop** — done: the subscription store and routes, the direct web push
+   sender, the service worker, the Account block. **Still needed:** the VAPID pair
+   in the environment. Prove with the Account test alert on Chrome or Edge on
+   Windows and on Safari or Chrome on macOS, then a scan of a code that names you.
 1. **Foundations** — done in code: `@azure/notification-hubs` in the backend,
    `expo-notifications` and its plugin in the app, the two hub variables in the
    environment. **Still needed:** a hub per environment with APNs and FCM v1
@@ -748,7 +835,8 @@ New Admin section **Notifications** (next to Users / KPI / Investor / Kiosk / QR
    the app shell, the Account block. Tagged accounts are prompted; untagged ones
    are never asked and are unregistered.
 4. **QR** — done: `notifyTags` on the model and panel, the tag picker, scan →
-   audience → two hub sends plus every subscribed browser, log row.
+   audience → one web push per browser subscription plus the two hub sends
+   (Apple, FCM v1), log row.
 5. **Admin Notifications** — done: `/admin/notifications` (tags, composer, log),
    the audience preview, and a test send that reaches the caller's own devices.
 6. **Hardening** — done: the reconcile cron and prune
@@ -799,8 +887,10 @@ Notifications entitlement; and the hub's behaviour when a token has expired
 
 - Unit: slug validation; expression building and the 20-tag refusal; installation
   tag computation; QR patch validation; legacy/new recipient union.
-- Integration with a fake hub client: scan produces the record, two sends, the
-  right payload per priority, `failed` on hub error.
+- Integration with a fake hub client and a fake push service: scan produces the
+  record, one browser send per subscription plus each platform send the audience
+  needs, the right payload per priority, `failed` on a hub error, and a withheld browser that is
+  simply absent from the audience rather than filtered after the fact.
 - On device: iOS granted / denied / provisional; Android 13 granted / denied;
   loud vs quiet with the phone unlocked, locked, muted; tag added and removed
   while installed; sign-out purge; second device for the same user; legacy code

@@ -4,47 +4,38 @@ import webpush from 'web-push'
 
 import { db } from '../db.ts'
 
+import { browserPayload, type BrowserAlert, type PushPriority } from './payload.ts'
+
 /**
  * Alerts for a browser — which is what a Windows, macOS or Linux user runs.
  *
  * The apps on a phone are not the only clients: v2's web build is what an
  * operator opens on a desktop, and it has to be told when a code is scanned just
- * as a phone does. A browser receives push through the Web Push protocol, so
- * this module is the desktop half of delivery:
+ * as a phone does. A browser subscribes once (`pushManager.subscribe`), which
+ * yields an endpoint and two keys; those are stored here against the user who is
+ * signed in, and every alert is then sent **straight from this service** to that
+ * endpoint with `web-push`.
  *
- * - A browser subscribes once (`pushManager.subscribe`), which yields an
- *   endpoint and two keys. That is stored here against the user who is signed in.
- * - A send encrypts one payload per subscription and posts it to that endpoint;
- *   the browser's push service wakes the service worker, which shows the
- *   notification. The browser does not have to be open.
+ * Azure Notification Hubs is not in this path, on purpose. A hub routes by a tag
+ * expression stored on each installation, which means every browser has to be
+ * registered, re-registered when its tags change, and repaired when a write
+ * fails — all of that to reach an endpoint we already know. A browser alert is
+ * addressed to a list of people the scan already resolved, so it is one request
+ * per subscription and nothing to keep in sync. The hub stays for what it is
+ * genuinely better at: the APNs and FCM tokens of the native apps, which this
+ * service has no way to deliver to itself.
  *
- * Why not Azure Notification Hubs for this? Its browser platform is web push, but
- * it excludes Safari, and Safari on macOS is a browser investors will use. The
- * standard protocol covers Chrome and Edge on Windows, and Chrome, Firefox and
- * Safari 16+ on macOS and Linux, so every desktop is one code path here.
+ * The cost of skipping the hub is that the sender has to hold the key the
+ * browser subscribed with: `VAPID_PUBLIC_KEY` is handed to the page to subscribe
+ * with, and `VAPID_PRIVATE_KEY` signs every send here. Because nothing else
+ * sends to browsers, that pair lives in this service's environment only.
  *
- * Tags are not involved yet: a send names the accounts to tell and this looks up
- * their subscriptions. When the tag registry lands, `sendToTags` filters this
- * same collection by the tags on the user — nothing about the transport changes.
+ * This collection is also the record of which browsers an account has alerts on
+ * — the account screen lists them, and removing one deletes its row.
  */
 
-export type PushPriority = 'loud' | 'quiet'
+export type { PushPriority }
 
-/**
- * The mark a desktop alert wears, as a path on the app's own origin.
- *
- * A notification shown by a browser is otherwise attributed to the browser —
- * "Google Chrome · app.inselfstorage.com" with Chrome's icon, which reads as a
- * message from the browser rather than from INSS. These two files live in the
- * app's `public/`, so the export copies them to the site root and the service
- * worker resolves the paths against its own origin. Relative on purpose: this
- * service does not know, and should not have to know, where the app is hosted.
- */
-const NOTIFICATION_ICON = '/notification-icon.png'
-/** The monochrome silhouette some platforms draw in the status bar. */
-const NOTIFICATION_BADGE = '/notification-badge.png'
-
-/** The two keys a browser subscription carries. Never logged, never returned. */
 export interface PushSubscriptionKeys {
   p256dh: string
   auth: string
@@ -72,20 +63,7 @@ export interface PushSubscriptionSummary {
   updatedAt: string
 }
 
-export interface PushMessage {
-  title: string
-  body: string
-  priority: PushPriority
-  /**
-   * Collapse key. A second alert with the same tag replaces the first in the
-   * tray instead of stacking, which is what a code scanned twice should do.
-   */
-  tag?: string
-  /** Where a click on the notification goes. */
-  url?: string
-  /** Copies of these strings ride along, for the service worker to use. */
-  data?: Record<string, string>
-}
+export type PushMessage = BrowserAlert
 
 export interface PushResult {
   /** Subscriptions the push service accepted. */
@@ -107,10 +85,11 @@ function subscriptions() {
 /**
  * The keys this service signs with.
  *
- * Both halves come from the environment: the public one is also what the app
- * subscribes with, so the two must match or the push service rejects every send.
- * Generate a pair once and keep it — a new pair invalidates every existing
- * subscription in the field.
+ * Both halves come from the environment: the public one is what the app
+ * subscribes with, the private one signs every send. A new pair invalidates
+ * every existing subscription in the field — the browser accepts a push only
+ * from the key its subscription was made under — so it is generated once and
+ * kept.
  */
 export function vapidKeys(): { publicKey: string; privateKey: string; subject: string } | null {
   const publicKey = process.env.VAPID_PUBLIC_KEY?.trim() ?? ''
@@ -250,7 +229,40 @@ export async function removeSubscription(userId: string, endpoint: string): Prom
 
   const collection = await subscriptions()
   const result = await collection.deleteOne({ _id: subscriptionId(clean), userId })
+
   return result.deletedCount > 0
+}
+
+/**
+ * Forgets every browser this account had alerts on.
+ *
+ * Called when an account is deactivated: a deactivated person must stop getting
+ * alerts whether or not their browser is still signed in. Reactivating does not
+ * recreate them — each browser re-registers the next time the app is opened.
+ */
+export async function deleteBrowserSubscriptions(userId: string): Promise<number> {
+  const collection = await subscriptions()
+  const result = await collection.deleteMany({ userId })
+
+  return result.deletedCount
+}
+
+/**
+ * Forgets browsers nobody has opened in a long time.
+ *
+ * Nothing has to be repaired any more — a subscription is used exactly as it was
+ * stored — so this job only has to stop the collection growing: a browser that
+ * has not re-registered in three months is one the app no longer runs in, and its
+ * endpoint is dead weight. Sends also delete rows the push service reports as
+ * gone (404/410), so this catches what those never see.
+ */
+export async function pruneBrowserSubscriptions(days = 90): Promise<{ pruned: number }> {
+  const collection = await subscriptions()
+  const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000)
+
+  const pruned = await collection.deleteMany({ updatedAt: { $lt: cutoff } })
+
+  return { pruned: pruned.deletedCount }
 }
 
 /** Every browser this user has turned alerts on in. */
@@ -266,39 +278,29 @@ export async function userSubscriptions(userId: string): Promise<PushSubscriptio
   }))
 }
 
-/** The payload a service worker's `push` handler reads. */
-function payloadFor(message: PushMessage): string {
-  const quiet = message.priority === 'quiet'
-  const tag = message.tag ?? 'inss'
+/** How many browsers these accounts have alerts on. For the composer's estimate. */
+export async function countBrowserSubscriptions(userIds: string[]): Promise<number> {
+  const recipients = [...new Set(userIds.filter(Boolean))]
+  if (recipients.length === 0) return 0
 
-  return JSON.stringify({
-    title: message.title,
-    body: message.body,
-    // The worker turns this into `silent` and `requireInteraction`: quiet is a
-    // notification that is there when you look, loud is one that says so.
-    priority: quiet ? 'quiet' : 'loud',
-    silent: quiet,
-    tag,
-    // A tag is what makes a replacement possible; without `renotify` a replaced
-    // notification arrives without making a sound.
-    renotify: !quiet,
-    icon: NOTIFICATION_ICON,
-    badge: NOTIFICATION_BADGE,
-    url: message.url ?? '/',
-    timestamp: Date.now(),
-    ...(message.data ?? {}),
-  })
+  const collection = await subscriptions()
+  return collection.countDocuments({ userId: { $in: recipients } })
 }
 
 /**
- * Tells every browser belonging to these accounts.
+ * Tells every browser these people have alerts turned on.
  *
- * One request per subscription, in parallel, each bounded by a timeout: a scan
- * is waiting on this and a slow push service must not hold a redirect. A 404 or
- * 410 means the browser is gone — the subscription is deleted rather than kept
- * and retried forever.
+ * One request per subscription, in parallel, each bounded by a timeout: a scan is
+ * waiting on this and a slow push service must not hold a redirect. The audience
+ * is already resolved — it is the same list the in-app ring used — so there is no
+ * tag expression and nobody has to be excluded afterwards. A 404 or 410 means the
+ * browser is gone — permission revoked, profile deleted, endpoint expired — so
+ * the row is deleted rather than kept and retried forever.
  */
-export async function sendToUsers(userIds: string[], message: PushMessage): Promise<PushResult> {
+export async function sendToBrowserSubscriptions(
+  userIds: string[],
+  message: PushMessage,
+): Promise<PushResult> {
   const result: PushResult = { sent: 0, removed: 0, errors: [], skipped: null }
 
   const recipients = [...new Set(userIds.filter((id) => Boolean(id)))]
@@ -313,7 +315,7 @@ export async function sendToUsers(userIds: string[], message: PushMessage): Prom
   const rows = await collection.find({ userId: { $in: recipients } }).toArray()
   if (rows.length === 0) return result
 
-  const payload = payloadFor(message)
+  const payload = JSON.stringify(browserPayload(message))
   const now = new Date()
 
   await Promise.all(

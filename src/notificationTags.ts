@@ -9,9 +9,10 @@ import { db } from './db.ts'
  * a typo cannot create a second, silently empty audience — an unknown slug is a
  * 400, not a send to nobody.
  *
- * Slugs are also what lands on a phone installation in Azure Notification Hubs,
- * prefixed as `nt:<slug>`. They are stored **unencrypted** there, so they are
- * deliberately dull words and never names, emails or property ids.
+ * Slugs are also what lands on an installation in Azure Notification Hubs — a
+ * phone's and a browser's alike — prefixed as `nt:<slug>`. They are stored
+ * **unencrypted** there, so they are deliberately dull words and never names,
+ * emails or property ids.
  */
 
 /** A slug: lowercase, starts with a letter or digit, 1–40 characters. */

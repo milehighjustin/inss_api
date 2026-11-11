@@ -1,8 +1,19 @@
 import { db } from '../db.ts'
+import { usersWithTags } from '../notificationTags.ts'
 import { getUser } from '../users.ts'
 
-import { PushError } from './browser.ts'
-import { deleteInstallation, hubConfigured, installationTags, registerInstallation } from './hub.ts'
+import {
+  PushError,
+  countBrowserSubscriptions,
+  deleteBrowserSubscriptions,
+} from './browser.ts'
+import {
+  deleteInstallation,
+  hubConfigured,
+  installationTags,
+  registerInstallation,
+  type HubPlatform,
+} from './hub.ts'
 
 /**
  * The devices a user has signed in on.
@@ -13,12 +24,25 @@ import { deleteInstallation, hubConfigured, installationTags, registerInstallati
  * last pushed and whether that push worked — the hub is the routing copy, this is
  * the record.
  *
+ * Phones are recorded in this collection. Browsers are recorded in
+ * `pushSubscriptions`, because their subscription keys are also what the direct
+ * Apple Web Push path needs, but they are hub installations too: a tag change
+ * and a deactivation have to reach both, which is why the two functions that do
+ * those things below call across to `browser.ts`.
+ *
  * A row is written before the hub is called. If the hub refuses, the row stays
  * with `syncError` set and the reconcile cron retries it: a device that was
  * registered once should not have to be discovered again.
  */
 
-export type InstallationPlatform = 'ios' | 'android'
+/**
+ * Where the app runs natively. Browsers are not here: a browser is a
+ * subscription (`browser.ts`), because it needs no hub to be reached.
+ *
+ * `macos` is an Apple token and `windows` a WNS channel URI, so both are
+ * delivered by the hub exactly as a phone's is.
+ */
+export type InstallationPlatform = HubPlatform
 
 export interface InstallationRecord {
   _id: string
@@ -125,7 +149,7 @@ export async function saveInstallation(
   if (!row) throw new PushError('That device could not be recorded')
 
   if (!hubConfigured()) {
-    const error = 'Phone notifications are not configured on the server yet.'
+    const error = 'Notifications are not configured on the server yet.'
     await collection.updateOne(
       { _id: installationId },
       { $set: { tagsSyncedAt: null, syncError: error } },
@@ -186,15 +210,19 @@ export async function deleteUserInstallations(userId: string): Promise<number> {
   }
 
   const result = await collection.deleteMany({ userId })
-  return result.deletedCount
+  const browsers = await deleteBrowserSubscriptions(userId)
+
+  return result.deletedCount + browsers
 }
 
 /**
- * Re-pushes this user's tags to every device they have.
+ * Re-pushes this user's tags to every phone they have.
  *
  * Called whenever `notificationTags` changes. Until this succeeds the hub still
  * routes by the old set, so this is not housekeeping: it is the moment a tag
- * change takes effect.
+ * change takes effect. Browsers need nothing here — they are addressed by the
+ * audience a scan resolves, so a tag change reaches them on the next alert with
+ * no registration to update.
  */
 export async function syncUserInstallations(
   userId: string,
@@ -202,6 +230,7 @@ export async function syncUserInstallations(
 ): Promise<{ updated: number; failed: number }> {
   const collection = await installations()
   const rows = await collection.find({ userId }).toArray()
+
   if (rows.length === 0) return { updated: 0, failed: 0 }
 
   const tags = installationTags(userId, notificationTags)
@@ -211,7 +240,7 @@ export async function syncUserInstallations(
 
   for (const row of rows) {
     try {
-      if (!hubConfigured()) throw new Error('Phone notifications are not configured yet')
+      if (!hubConfigured()) throw new Error('Notifications are not configured yet')
 
       await registerInstallation({
         installationId: row._id,
@@ -264,7 +293,7 @@ export async function reconcileInstallations(days = 90): Promise<{
 
   for (const row of stale) {
     try {
-      if (!hubConfigured()) throw new Error('Phone notifications are not configured')
+      if (!hubConfigured()) throw new Error('Notifications are not configured')
 
       await registerInstallation({
         installationId: row._id,
@@ -299,12 +328,40 @@ export async function userInstallations(userId: string): Promise<InstallationSum
   return rows.map((row) => summarize(row, !row.syncError && Boolean(row.tagsSyncedAt)))
 }
 
-/** Every device carrying any of these notification tags. Debugging aid. */
+/**
+ * How many devices carry any of these notification tags: phones by the tags on
+ * their installation, browsers by the tags on the accounts they belong to (a
+ * browser's tags are the account's, so they are never stale here).
+ */
 export async function countInstallationsForTags(notificationTags: string[]): Promise<number> {
   if (notificationTags.length === 0) return 0
 
   const collection = await installations()
-  return collection.countDocuments({
+  const phones = await collection.countDocuments({
     tags: { $in: notificationTags.map((tag) => `nt:${tag}`) },
   })
+
+  const accounts = await usersWithTags(notificationTags)
+  return phones + (await countBrowserSubscriptions(accounts))
+}
+
+/**
+ * The platforms these people actually have: which sends are worth making.
+ *
+ * A hub send is one platform per request, so a broadcast still costs a request
+ * for a platform nobody has — and if that platform's credentials are missing
+ * from the hub, a legitimate alert would be logged as a failure. Knowing the
+ * platforms in the audience keeps the log honest: an entry means there was a
+ * device for it.
+ */
+export async function platformsFor(userIds: string[]): Promise<HubPlatform[]> {
+  const recipients = [...new Set(userIds.filter(Boolean))]
+  if (recipients.length === 0) return []
+
+  const collection = await installations()
+  const found: unknown[] = await collection.distinct('platform', {
+    userId: { $in: recipients },
+  })
+
+  return found.filter((platform): platform is HubPlatform => Boolean(platform))
 }

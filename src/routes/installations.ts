@@ -11,7 +11,8 @@ import {
 } from '../push/installations.ts'
 
 /**
- * A phone registering to be told.
+ * A native app registering to be told — a phone, or the same app built for macOS
+ * or Windows.
  *
  * The app posts once per install and again whenever something changes: a new
  * push token, new notification tags, or a foreground after a failed attempt. The
@@ -24,8 +25,12 @@ import {
 
 export const installationRoutes = new Hono()
 
+const PLATFORMS: InstallationPlatform[] = ['ios', 'android', 'macos', 'windows']
+
 function platformOf(value: unknown): InstallationPlatform | null {
-  return value === 'ios' || value === 'android' ? value : null
+  return PLATFORMS.includes(value as InstallationPlatform)
+    ? (value as InstallationPlatform)
+    : null
 }
 
 /**
@@ -44,7 +49,8 @@ installationRoutes.get('/devices', async (c) => {
 /**
  * POST /api/mobile/notifications/installations
  *
- * Body: { installationId, platform: 'ios' | 'android', pushChannel, appVersion?, deviceLabel? }
+ * Body: { installationId, platform: 'ios' | 'android' | 'macos' | 'windows',
+ *         pushChannel, appVersion?, deviceLabel? }
  * Success: { installation, synced }
  *
  * `synced: false` means the device is remembered but the hub has not accepted it
@@ -57,7 +63,9 @@ installationRoutes.post('/installations', async (c) => {
 
   const body = await readJson(c)
   const platform = platformOf(body.platform)
-  if (!platform) return fail(c, 'A device must be an iPhone or an Android phone', 400)
+  if (!platform) {
+    return fail(c, 'A device must report ios, android, macos or windows', 400)
+  }
 
   try {
     const result = await saveInstallation(user.userId, {

@@ -14,6 +14,7 @@ import {
 } from '../cron/quickbooks.ts'
 import { refreshInvestorRoles } from '../cron/roles.ts'
 import { runRefresh, type RefreshReport } from '../cron/run.ts'
+import { pruneBrowserSubscriptions } from '../push/browser.ts'
 import { reconcileInstallations } from '../push/installations.ts'
 
 /**
@@ -80,16 +81,19 @@ cronRoutes.get('/cubby-process', async (c) => {
 })
 
 /**
- * Push installations the hub refused are retried, and devices nobody has opened
+ * Phone installations the hub refused are retried and devices nobody has opened
  * in three months are forgotten.
  *
- * This is what makes a tag change eventually true: saving tags rewrites each
- * device's installation, and anything the hub rejected that moment is fixed here
- * rather than being silently stale forever.
+ * This is what makes a tag change eventually true for the phones: saving tags
+ * rewrites each installation, and anything the hub rejected that moment is fixed
+ * here rather than being silently stale forever. Browsers have nothing to
+ * repair — their subscription is used exactly as stored — so for them this job
+ * only prunes the ones the app has not re-registered in months.
  */
 cronRoutes.get('/notifications-sync', async (c) => {
   const report = await runRefresh([
     { name: 'installations', run: () => reconcileInstallations() },
+    { name: 'browsers', run: () => pruneBrowserSubscriptions() },
   ])
 
   return respond(c, report)

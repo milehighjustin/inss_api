@@ -2,8 +2,9 @@ import { randomUUID } from 'node:crypto'
 
 import { db } from './db.ts'
 import { usersWithTags } from './notificationTags.ts'
-import { sendToUsers } from './push/browser.ts'
-import { sendByTags, userTags } from './push/hub.ts'
+import { sendToBrowserSubscriptions } from './push/browser.ts'
+import { platformsFor } from './push/installations.ts'
+import { sendByTags, tagExpressionFor, userTags } from './push/hub.ts'
 import type { QrCode, QrNotificationPriority } from './qr.ts'
 import { qrNames } from './qr.ts'
 import { recordOffers, type AlertRef } from './activity.ts'
@@ -13,10 +14,11 @@ import { ringUsers } from './rtcSignaling.ts'
  * The notifications a scan produces, and the one place they leave the system.
  *
  * An alert is addressed to **tags**, and the tags become people here: the
- * accounts carrying one are looked up, their browsers are pushed to directly,
- * and their phones are reached through Notification Hubs by tag expression.
- * Codes configured before tags keep their named recipients, and those ids ride
- * along as `user:<id>` tags so a printed sign does not have to be reprinted.
+ * accounts carrying one are looked up, and every channel they have enabled is
+ * then told — phones through Notification Hubs by tag expression, browsers by
+ * this service sending to each subscription it holds. Codes configured before
+ * tags keep their named recipients, and those ids ride along as `user:<id>` tags
+ * so a printed sign does not have to be reprinted.
  *
  * The record is the contract and the history. Whatever happens — nothing
  * configured, nobody subscribed, a push service refusing — is written back onto
@@ -27,7 +29,7 @@ export type NotificationStatus = 'pending' | 'delivered' | 'failed' | 'suppresse
 
 export type NotificationKind = 'qr-scan' | 'manual' | 'document'
 
-export type NotificationChannel = 'browser' | 'apns' | 'fcmv1'
+export type NotificationChannel = 'browser' | 'apns' | 'fcmv1' | 'wns'
 
 /** One attempt, per transport, and how it went. */
 export interface NotificationSend {
@@ -292,13 +294,19 @@ export async function notificationsForCode(
 /**
  * Delivery.
  *
- * Two channels, both addressed from the same message and neither able to fail
- * the other:
+ * One message, sent down two paths, neither able to fail the other:
  *
- * - **Browsers** (Windows, macOS, Linux): one encrypted web-push payload per
- *   subscription, directly from this service.
- * - **Phones**: one APNs send and one FCM v1 send through the hub, by tag
- *   expression, so Azure does the fan-out.
+ * - **Browsers** — the desktop and web client — are pushed directly by
+ *   `push/browser.ts`, one encrypted request per subscription, to the audience
+ *   resolved above. No hub, no tag expression.
+ * - **The hub**: an APNs send, an FCM v1 send and a WNS send by tag expression
+ *   — but only for the platforms the audience actually has, so Azure fans out to
+ *   the iPhones, Macs and Android phones carrying those tags.
+ *
+ * Browser alerts are deliberately held back from anyone on a call, because the
+ * browser send runs from this resolved list: somebody who is held is simply not
+ * in it. For the phones the same exclusion has to travel inside the expression
+ * as `&& !(user:…)`, since Azure does that fan-out.
  *
  * A failure never fails the scan: the row keeps what happened, and a scan's
  * redirect is answered whatever the push services say.
@@ -337,9 +345,14 @@ async function deliver(record: NotificationRecord): Promise<void> {
   const rings = record.kind !== 'document'
 
   let reachable = audience
+  // Whoever is answered on a call right now. The hub fans out by tag, so these
+  // have to travel as an exclusion in the expression rather than be filtered out
+  // of a list after the fact.
+  let held: string[] = []
   if (rings && record.priority === 'loud') {
     const rung = ringUsers(audience, alert)
     reachable = rung.reached
+    held = rung.held
 
     const ref: AlertRef = {
       notificationId: record._id,
@@ -376,7 +389,9 @@ async function deliver(record: NotificationRecord): Promise<void> {
   // refuses to go past it; a code from before that rule is cut here rather than
   // failing the whole send, and its named people are still reached directly.
   const hubTags = [...ntTags, ...named].slice(0, 20)
-  const expression = hubTags.join(' || ')
+  // What the hub is actually addressed by, exclusions and all: the log should
+  // say where an alert was sent, not where it would have gone without a call.
+  const expression = hubTags.length > 0 ? tagExpressionFor(hubTags, held) : ''
 
   const data: Record<string, string> = { kind: record.kind }
   if (record.qrCodeId) data.qrCodeId = record.qrCodeId
@@ -391,27 +406,40 @@ async function deliver(record: NotificationRecord): Promise<void> {
     data,
   }
 
-  const [browsers, phones] = await Promise.all([
-    sendToUsers(reachable, {
+  const url = record.kind === 'document' ? '/investor/files' : '/'
+
+  // Which native platforms are worth a send. Read before the sends go out, so a
+  // platform that registers mid-scan is simply picked up by the next alert.
+  const platforms = await platformsFor(audience)
+
+  const [browsers, hub] = await Promise.all([
+    sendToBrowserSubscriptions(reachable, {
       ...message,
       // A document alert lands on the Files tab, which is where the thing it is
       // telling you about actually is.
-      url: record.kind === 'document' ? '/investor/files' : '/',
+      url,
     }),
-    hubTags.length > 0 ? sendByTags(hubTags, message) : Promise.resolve(null),
+    hubTags.length > 0
+      ? sendByTags(hubTags, { ...message, url }, { excludeUserIds: held, platforms })
+      : Promise.resolve(null),
   ])
 
   const sends: NotificationSend[] = []
 
+  // One `browser` entry however many subscriptions answered: the log says
+  // whether browsers were told, and the count would only be device bookkeeping.
   if (!browsers.skipped) {
     sends.push({
       channel: 'browser',
       ok: browsers.sent > 0,
-      error: browsers.sent === 0 ? browsers.errors[0] ?? 'No browser is subscribed' : undefined,
+      error:
+        browsers.sent === 0
+          ? browsers.errors[0] ?? 'No browser of theirs has alerts turned on'
+          : undefined,
     })
   }
 
-  for (const leg of phones?.legs ?? []) {
+  for (const leg of hub?.legs ?? []) {
     sends.push({ channel: leg.channel, ok: leg.ok, error: leg.error })
   }
 
@@ -433,7 +461,7 @@ async function deliver(record: NotificationRecord): Promise<void> {
         : 'Nobody has one of these notification tags, so nobody was told.'
   } else {
     update.note =
-      'Nobody who should be told has alerts turned on yet — no browser is subscribed and phone push is not configured.'
+      'Nobody who should be told has alerts turned on yet — no browser is subscribed and push is not configured on the server.'
   }
 
   await (await notifications()).updateOne(

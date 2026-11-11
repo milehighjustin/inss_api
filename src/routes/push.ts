@@ -6,19 +6,20 @@ import {
   PushError,
   removeSubscription,
   saveSubscription,
-  sendToUsers,
+  sendToBrowserSubscriptions,
   vapidPublicKey,
 } from '../push/browser.ts'
 import { sendByTags } from '../push/hub.ts'
+import { platformsFor } from '../push/installations.ts'
 import { LIMITS, checkLimit, retryAfterHeaders } from '../rateLimit.ts'
 
 /**
- * Desktop alerts: a browser registering to be told, and being told.
+ * Browser alerts: a browser registering to be told, and being told.
  *
  * The client is the web build on Windows, macOS or Linux. It asks for the key,
- * subscribes with it, and posts the subscription here; the server keeps it
- * against the signed-in user and sends to it when a code is scanned. There is no
- * device token and nothing to rotate.
+ * subscribes with it, and posts the subscription here; the server keeps that
+ * subscription and sends to it directly on every alert. There is no device
+ * token, nothing to rotate, and no hub installation to keep in step.
  *
  * Nothing here is administrator-only: every route acts on the caller's own
  * subscriptions, and a user can only stop their own alerts.
@@ -43,6 +44,11 @@ function keysOf(value: unknown): { p256dh: string; auth: string } | null {
  * Success: { publicKey } — the VAPID public key to subscribe with, or null when
  * the server has no keys yet. The app says so rather than failing at subscribe
  * time with an error nobody can act on.
+ *
+ * This service is the only sender to browsers, so the pair behind this key lives
+ * in its environment and nowhere else: the private half signs every browser
+ * alert, and a subscription made with this key is reachable by nothing that does
+ * not hold it.
  */
 pushRoutes.get('/key', async (c) => {
   const user = await requireUser(c)
@@ -108,13 +114,13 @@ pushRoutes.post('/unsubscribe', async (c) => {
  * POST /api/mobile/push/test
  *
  * Success: { sent, browser, phone } — one loud alert to the caller's own
- * devices, whichever they are: browsers this account has subscribed, and phones
- * it has registered with the hub.
+ * devices, whichever they are: every browser subscribed to this account, and
+ * their phones through the hub.
  *
  * This is how someone proves alerts work without waiting for a code to be
- * scanned. It is scoped to the caller by construction — the browser lookup is by
- * account, and the phone send uses only the caller's `user:<id>` tag — so it
- * cannot be used to reach anyone else.
+ * scanned. It is scoped to the caller by construction — every send uses only the
+ * caller's `user:<id>` tag or their own subscriptions — so it cannot be used to
+ * reach anyone else.
  */
 pushRoutes.post('/test', async (c) => {
   const user = await requireUser(c)
@@ -140,20 +146,38 @@ pushRoutes.post('/test', async (c) => {
     data: { kind: 'test' },
   }
 
-  const [browser, phone] = await Promise.all([
-    sendToUsers([user.userId], { ...message, url: '/' }),
-    sendByTags([`user:${user.userId}`], message),
+  // Only the platforms this one account has: a test should not depend on
+  // credentials for a device the person does not own.
+  const platforms = await platformsFor([user.userId])
+
+  const [browsers, hub] = await Promise.all([
+    sendToBrowserSubscriptions([user.userId], { ...message, url: '/' }),
+    sendByTags([`user:${user.userId}`], { ...message, url: '/' }, { platforms }),
   ])
 
-  const sent = browser.sent + phone.sent
+  // Browsers are counted, not guessed: one subscription answered each. The hub
+  // reports a platform rather than a device count, so each platform it accepted
+  // counts as one phone told — enough for a button that only has to answer "did
+  // anything arrive".
+  const browser = browsers.sent
+  const phone = hub.legs.filter((leg) => leg.ok).length
+  const sent = browser + phone
 
   if (sent === 0) {
-    if (browser.skipped === 'not-configured' && phone.skipped === 'not-configured') {
+    if (browsers.skipped === 'not-configured' && hub.skipped === 'not-configured') {
       return fail(c, 'Alerts are not configured on the server yet.', 500)
     }
 
-    return fail(c, 'No device of yours is registered for alerts. Turn them on first.', 404)
+    // Browsers first: their error is the one a desktop user can act on.
+    const reason = browsers.errors[0] ?? hub.errors[0]
+    return fail(
+      c,
+      reason
+        ? `No device of yours accepted it: ${reason}`
+        : 'No device of yours is registered for alerts. Turn them on first.',
+      404,
+    )
   }
 
-  return c.json({ sent, browser: browser.sent, phone: phone.sent })
+  return c.json({ sent, browser, phone })
 })

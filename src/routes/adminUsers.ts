@@ -188,7 +188,7 @@ adminUserRoutes.get('/:userId', async (c) => {
 /**
  * PATCH /api/mobile/admin/users/:userId
  *
- * Body: any of { firstName, lastName, phone, email, roles, active }
+ * Body: any of { firstName, lastName, phone, email, roles, active, notificationTags }
  * Success: { user }
  *
  * One endpoint for every edit the user panel makes: profile fields, role
@@ -229,17 +229,27 @@ adminUserRoutes.patch('/:userId', async (c) => {
 
   if ('email' in body) {
     const email = text(body.email).toLowerCase()
-    if (email && !EMAIL_PATTERN.test(email)) {
+    const current = (existing.email ?? '').toLowerCase()
+
+    // A field sent back exactly as it was is not an edit, and must not be able to
+    // fail the save. v1 stored a bare username in `email` on some accounts — no
+    // `@`, so it can never pass the check below — and a client that posts the
+    // whole form would otherwise be unable to save a role or a notification tag
+    // on those accounts, forever, with an error about a field nobody touched.
+    if (email === current) {
+      // Unchanged: nothing to write.
+    } else if (!email) {
+      // Cleared on purpose: an empty field means "no address", not "leave it".
+      patch.email = undefined
+    } else if (!EMAIL_PATTERN.test(email)) {
       errors.push('Invalid email address')
-    } else if (email && email !== (existing.email ?? '').toLowerCase()) {
+    } else {
       const taken = await findUserByEmail(email)
       if (taken && String(taken._id) !== userId) {
         errors.push('A user with this email already exists')
       } else {
         patch.email = email
       }
-    } else {
-      patch.email = email || undefined
     }
   }
 

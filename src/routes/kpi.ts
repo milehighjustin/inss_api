@@ -7,6 +7,7 @@ import {
   createSavedKpiList,
   deleteSavedKpiList,
   savedKpiLists,
+  updateSavedKpiList,
 } from '../kpiLists.ts'
 
 /**
@@ -68,6 +69,43 @@ kpiRoutes.post('/lists', async (c) => {
   if (facilityIds.length === 0) return fail(c, 'Choose at least one facility', 400)
 
   return c.json({ list: await createSavedKpiList(name, facilityIds) }, 201)
+})
+
+/**
+ * PATCH /api/mobile/kpi/lists/:listId   { name?, facilityIds? }
+ *
+ * Success: { list }
+ *
+ * Any subset: rename, re-pick the facilities, or both. Lists are authored in
+ * Admin → KPI, so this is the edit behind that panel; the board only reads them.
+ * A list that is gone answers 404 rather than being recreated.
+ */
+kpiRoutes.patch('/lists/:listId', async (c) => {
+  const user = await requireRoles(c, KPI_ROLES)
+  if (user instanceof Response) return user
+
+  const body = await readJson(c)
+  const patch: { name?: string; facilityIds?: string[] } = {}
+
+  if (body.name !== undefined) {
+    const name = text(body.name)
+    if (!name) return fail(c, 'Name the list before saving it', 400)
+    patch.name = name
+  }
+
+  if (body.facilityIds !== undefined) {
+    if (!Array.isArray(body.facilityIds)) return fail(c, 'Facilities must be a list', 400)
+    const facilityIds = body.facilityIds.filter(
+      (id): id is string => typeof id === 'string' && Boolean(id),
+    )
+    if (facilityIds.length === 0) return fail(c, 'Choose at least one facility', 400)
+    patch.facilityIds = facilityIds
+  }
+
+  const list = await updateSavedKpiList(c.req.param('listId'), patch)
+  if (!list) return fail(c, 'That list is no longer there', 404)
+
+  return c.json({ list })
 })
 
 /**

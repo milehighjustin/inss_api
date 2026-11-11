@@ -50,6 +50,33 @@ export async function createSavedKpiList(
   return serialize(list)
 }
 
+/**
+ * Changes a list's name, its facilities, or both.
+ *
+ * A partial save stays partial: the admin panel can rename a list without
+ * restating its membership, and re-pick membership without retyping the name.
+ * Returns null when the list is gone, which the route answers as a 404 rather
+ * than inventing one.
+ */
+export async function updateSavedKpiList(
+  listId: string,
+  patch: { name?: string; facilityIds?: string[] },
+): Promise<SavedKpiList | null> {
+  const collection_ = await collection()
+  const update: Partial<SavedListDocument> = {}
+
+  if (patch.name !== undefined) update.name = patch.name
+  if (patch.facilityIds !== undefined) update.list = patch.facilityIds
+
+  if (Object.keys(update).length > 0) {
+    const result = await collection_.updateOne({ _id: listId }, { $set: update })
+    if (result.matchedCount === 0) return null
+  }
+
+  const row = await collection_.findOne({ _id: listId })
+  return row ? serialize(row) : null
+}
+
 /** True when a list was actually removed. */
 export async function deleteSavedKpiList(listId: string): Promise<boolean> {
   const result = await (await collection()).deleteOne({ _id: listId })

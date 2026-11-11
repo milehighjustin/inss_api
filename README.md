@@ -38,7 +38,7 @@ loader; a deployed process takes its variables from the host.
 | `encryptionKey` | sealing the QuickBooks tokens at rest — the same key and scheme the existing ones were sealed with |
 | `googleClientEmail`, `googlePrivateKey` | the service account the console's photo tool uploads with (v1's names); `GOOGLE_DRIVE_SUBJECT` and `GOOGLE_DRIVE_PHOTO_FOLDER` override the impersonated account and the destination folder |
 | `KIOSK_PUBLIC_BASE_URL` | the public origin a kiosk's `kioskUrl` is built from (default `https://app.inselfstorage.com`) |
-| `QR_PUBLIC_BASE_URL` | the origin printed QR codes encode — the **app's** host, defaulting to `https://app.inselfstorage.com`. It is never taken from `API_URL` or from the request, so a code drawn by a deployed API still points at the app. Set it only to override: a local build talking to a local app, or a second hostname |
+| *(QR codes take no configuration)* | Every code encodes `https://app.inselfstorage.com/qr/<id>` — a constant in `src/qr.ts`, deliberately not an environment variable. A code is printed and scanned elsewhere, so its host cannot follow whichever environment drew it. Changing the host means reprinting every sign |
 | `CRON_SECRET` | the bearer secret the four `/api/cron/*` endpoints require; with none set they all answer 401 |
 | `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY` | what browsers subscribe with and what signs every browser send. Browsers are pushed by this service alone, so the pair lives here and nowhere else. Generate with `node -e "console.log(require('web-push').generateVAPIDKeys())"` and never regenerate: a new pair invalidates every existing subscription. Without them scans are still recorded and nobody is told |
 | `VAPID_SUBJECT` | the contact in the VAPID header, a `mailto:` or URL (default `mailto:support@inselfstorage.com`) |
@@ -73,6 +73,7 @@ magic-link landing page, which is HTML for a browser.
 | `GET /api/mobile/kpi` | admin, manager, supervisor | `{ facilities }` — every `kpiActive` facility from `loglady.locations` with its metrics as raw numbers. |
 | `GET /api/mobile/kpi/lists` | admin, manager, supervisor | `{ lists }` — saved facility subsets from `loglady.savedKpiLists`. Shared by everyone, exactly as on the website. |
 | `POST /api/mobile/kpi/lists` | admin, manager, supervisor | `{ name, facilityIds }` → `{ list }`. |
+| `PATCH /api/mobile/kpi/lists/:listId` | admin, manager, supervisor | `{ name?, facilityIds? }` → `{ list }`. Rename, re-pick, or both; 404 when the list is gone. Lists are authored in Admin → KPI. |
 | `DELETE /api/mobile/kpi/lists/:listId` | admin, manager, supervisor | `{ deleted: true }`; 404 when the list is already gone. |
 | `GET /api/mobile/investor` | investor | `{ locations, portfolio, organizationPortfolio }` — v1's `prepareInvestor`, scoped to the caller's own `investors` record. |
 | `GET /api/mobile/investor/files` | investor | `{ files }` — the documents shared with this investor, grouped by folder in the app. |

@@ -139,17 +139,24 @@ function codeFromRow(row: QrDocument): QrCode {
 }
 
 /**
- * Where the public pages live: the app, never this service.
+ * Where the public pages live: the app's production host, and nothing else.
  *
- * A code encodes one hostname, and that hostname has to be the app's — `/qr/:id`
- * and `/qr/:id/kiosk` are the app's routes. It must not come from `API_URL` or
- * from the request's own origin: behind a proxy those are the API's host, so a
- * code drawn there sends a phone to the API (and breaks again the day the API
- * moves). `QR_PUBLIC_BASE_URL` overrides it — a local build, or a second
- * hostname — and the default is the host printed signs already carry.
+ * A printed code is permanent, so the hostname inside it has to be permanent too.
+ * That is why this is a constant and not configuration: a code drawn on a
+ * development build still has to work when it is photographed, printed and
+ * scanned by somebody else, so the image may never carry whichever host happened
+ * to serve the machine that drew it. Not `API_URL`, not the request's own origin
+ * (both are this service, behind a proxy), and not an environment variable — an
+ * override is exactly the thing that makes a code point somewhere that only
+ * exists on one laptop.
+ *
+ * `/qr/:id` and `/qr/:id/kiosk` are the app's routes on this host. Changing it
+ * means reprinting every sign, which is why it lives in one place, here.
  */
+const QR_PUBLIC_HOST = 'https://app.inselfstorage.com'
+
 export function qrBaseUrl(): string {
-  return (process.env.QR_PUBLIC_BASE_URL ?? 'https://app.inselfstorage.com').replace(/\/+$/, '')
+  return QR_PUBLIC_HOST
 }
 
 /** The address a code resolves to, and the page that displays it. */

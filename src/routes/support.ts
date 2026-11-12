@@ -1,0 +1,128 @@
+import { Hono } from 'hono'
+
+import { requireRoles, type SessionUser } from '../auth/session.ts'
+import { fail } from '../http.ts'
+import {
+  SESSION_STAFF_ROLES,
+  SUPPORT_ROLES,
+  activeSessions,
+  endSession,
+  mySession,
+  sessionById,
+  sessionHistory,
+  startSession,
+} from '../support.ts'
+
+/**
+ * The Support panel's API.
+ *
+ * Two audiences again:
+ *
+ * - **Your own shift** — start it, end it, read it. Anyone the Support panel is
+ *   open to, which is the support group plus the people who already read the
+ *   performance report.
+ * - **Everyone's shifts** — the live list, the history and one session's detail.
+ *   Administrators, managers and supervisors, matching the report beside it. A
+ *   support account may still read its own session, which is what the detail
+ *   route allows below even though the list does not.
+ */
+
+export const supportRoutes = new Hono()
+
+/** GET /api/mobile/support/session — the shift this account has open, or null. */
+supportRoutes.get('/session', async (c) => {
+  const user = await requireRoles(c, SUPPORT_ROLES)
+  if (user instanceof Response) return user
+
+  return c.json({ session: await mySession(user.userId) })
+})
+
+/**
+ * POST /api/mobile/support/sessions
+ *
+ * Success: { session, replaced } (201)
+ *
+ * `replaced` is true when a shift was already open and this one took over, so
+ * the app can say that rather than pretend nothing happened.
+ */
+supportRoutes.post('/sessions', async (c) => {
+  const user = await requireRoles(c, SUPPORT_ROLES)
+  if (user instanceof Response) return user
+
+  return c.json(await startSession(user), 201)
+})
+
+/**
+ * POST /api/mobile/support/sessions/end
+ *
+ * Success: { session } — null when nothing was open. Ending a shift that is
+ * already over is not an error: it is the state the caller asked for.
+ */
+supportRoutes.post('/sessions/end', async (c) => {
+  const user = await requireRoles(c, SUPPORT_ROLES)
+  if (user instanceof Response) return user
+
+  return c.json({ session: await endSession(user.userId) })
+})
+
+/**
+ * GET /api/mobile/support/sessions/active
+ *
+ * Success: { sessions } — everyone on duty now, longest-serving first, with how
+ * long they have been on and what has happened so far.
+ */
+supportRoutes.get('/sessions/active', async (c) => {
+  const gate = await staff(c)
+  if (gate instanceof Response) return gate
+
+  return c.json({ sessions: await activeSessions() })
+})
+
+/**
+ * GET /api/mobile/support/sessions?userId=&limit=
+ *
+ * Success: { sessions } — newest first. `userId` is how the performance report
+ * drills into one person.
+ */
+supportRoutes.get('/sessions', async (c) => {
+  const gate = await staff(c)
+  if (gate instanceof Response) return gate
+
+  const limit = Number(c.req.query('limit') ?? '20')
+  const userId = c.req.query('userId')?.trim()
+
+  return c.json({
+    sessions: await sessionHistory({
+      limit: Number.isFinite(limit) ? limit : 20,
+      ...(userId ? { userId } : {}),
+    }),
+  })
+})
+
+/**
+ * GET /api/mobile/support/sessions/:sessionId
+ *
+ * Success: { session } — the full picture for one shift: what reached them, what
+ * they clicked, how fast, and what the calls after those answers lasted.
+ *
+ * Staff read anyone's; a support account reads its own and nothing else.
+ */
+supportRoutes.get('/sessions/:sessionId', async (c) => {
+  const user = await requireRoles(c, SUPPORT_ROLES)
+  if (user instanceof Response) return user
+
+  const session = await sessionById(c.req.param('sessionId'))
+  if (!session) return fail(c, 'That session is not there', 404)
+
+  const staff = SESSION_STAFF_ROLES.some((role) => user.roles.includes(role))
+  if (!staff && session.userId !== user.userId) {
+    return fail(c, 'You do not have access to this', 403)
+  }
+
+  return c.json({ session })
+})
+
+/** The caller as someone who may see every session. */
+async function staff(c: Parameters<typeof requireRoles>[0]): Promise<SessionUser | Response> {
+  return requireRoles(c, SESSION_STAFF_ROLES)
+}

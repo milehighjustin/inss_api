@@ -83,9 +83,10 @@ interface PersonRow {
  * Names and roles for a set of ids, read once per batch.
  *
  * A session outlives a rename, so the name is looked up rather than copied onto
- * the row; a deleted account still gets a row, labelled honestly.
+ * the row; a deleted account still gets a row, labelled honestly. Exported
+ * because the desk board needs the same names for whoever answered an alert.
  */
-async function people(
+export async function peopleById(
   userIds: readonly string[],
 ): Promise<Map<string, { name: string; roles: string[] }>> {
   const unique = [...new Set(userIds.filter(Boolean))]
@@ -144,7 +145,7 @@ async function summarizeMany(
 ): Promise<SupportSession[]> {
   if (rows.length === 0) return []
 
-  const persons = await people(rows.map((row) => row.userId))
+  const persons = await peopleById(rows.map((row) => row.userId))
 
   // `to` is exclusive, so an event written at the exact instant of the end is
   // included rather than falling off the shift it belongs to.

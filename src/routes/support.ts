@@ -1,6 +1,7 @@
 import { Hono } from 'hono'
 
 import { requireRoles, type SessionUser } from '../auth/session.ts'
+import { DeskAlertError, claimDeskAlert, recentDeskAlerts } from '../deskAlerts.ts'
 import { fail } from '../http.ts'
 import {
   SESSION_STAFF_ROLES,
@@ -63,6 +64,51 @@ supportRoutes.post('/sessions/end', async (c) => {
   if (user instanceof Response) return user
 
   return c.json({ session: await endSession(user.userId) })
+})
+
+/**
+ * GET /api/mobile/support/alerts?minutes=120&limit=40
+ *
+ * Success: { alerts } — the desk board: alerts addressed to this person's tags in
+ * the window, newest first, with what became of each. `canAccept` is the one that
+ * matters: it is true when nobody has answered and this person has not settled it,
+ * which is exactly the alert a person starting a shift can still take.
+ */
+supportRoutes.get('/alerts', async (c) => {
+  const user = await requireRoles(c, SUPPORT_ROLES)
+  if (user instanceof Response) return user
+
+  const minutes = Number(c.req.query('minutes') ?? '0')
+  const limit = Number(c.req.query('limit') ?? '0')
+
+  return c.json({
+    alerts: await recentDeskAlerts(user, {
+      ...(Number.isFinite(minutes) && minutes > 0 ? { minutes } : {}),
+      ...(Number.isFinite(limit) && limit > 0 ? { limit } : {}),
+    }),
+  })
+})
+
+/**
+ * POST /api/mobile/support/alerts/:notificationId/claim
+ *
+ * Success: { alert } — the board row, now answered by this person.
+ *
+ * 403 when the alert was never addressed to them, 409 when somebody else has
+ * already answered it. Claiming one they settled already is not an error: it
+ * answers with the row as it stands instead of recording a second answer.
+ */
+supportRoutes.post('/alerts/:notificationId/claim', async (c) => {
+  const user = await requireRoles(c, SUPPORT_ROLES)
+  if (user instanceof Response) return user
+
+  try {
+    const alert = await claimDeskAlert(user, c.req.param('notificationId'))
+    return c.json({ alert })
+  } catch (cause) {
+    if (cause instanceof DeskAlertError) return fail(c, cause.message, cause.status)
+    throw cause
+  }
 })
 
 /**

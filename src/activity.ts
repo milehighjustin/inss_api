@@ -45,6 +45,12 @@ export interface ActivityEvent {
   callId?: string
   /** Offer to answer/ignore, in milliseconds. On the answering event. */
   latencyMs?: number
+  /**
+   * True when the answer came from the desk board rather than from the alert
+   * itself — the person picked it up at the start of their shift, minutes after
+   * it rang. The response time is measured from the alert, not from the claim.
+   */
+  claimed?: boolean
   /** The call's length, in milliseconds. On the ending event. */
   durationMs?: number
 }
@@ -453,6 +459,8 @@ export interface PersonActivity {
   notifications: number
   /** Alerts they clicked: answered plus ignored. */
   clicked: number
+  /** Of those answers, how many were picked up from the desk board after the fact. */
+  claimed: number
   firstActivityAt: string | null
   lastActivityAt: string | null
 }
@@ -481,6 +489,7 @@ export async function personActivity(
   let ignored = 0
   let calls = 0
   let talkMs = 0
+  let claimed = 0
   const latencies: number[] = []
   const alerts = new Set<string>()
 
@@ -494,6 +503,7 @@ export async function personActivity(
         break
       case 'alert-answered':
         answered += 1
+        if (event.claimed === true) claimed += 1
         if (typeof event.latencyMs === 'number') latencies.push(event.latencyMs)
         break
       case 'alert-ignored':
@@ -532,6 +542,7 @@ export async function personActivity(
     talkSeconds: Math.round(talkMs / 1000),
     notifications: alerts.size,
     clicked: answered + ignored,
+    claimed,
     firstActivityAt: first ? first.at.toISOString() : null,
     lastActivityAt: last ? last.at.toISOString() : null,
   }

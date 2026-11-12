@@ -13,6 +13,7 @@ import {
   slugsOf,
 } from '../notificationTags.ts'
 import { deleteUserInstallations, syncUserInstallations } from '../push/installations.ts'
+import { SUPPORT_ROLE, endSession } from '../support.ts'
 import {
   createUser,
   findUserByEmail,
@@ -38,6 +39,7 @@ export const ASSIGNABLE_ROLES = [
   'developer',
   'investor',
   'manager',
+  'support',
   'supervisor',
 ] as const
 
@@ -308,11 +310,17 @@ adminUserRoutes.patch('/:userId', async (c) => {
   }
 
   // A deactivated account stops getting alerts at once: its devices are removed
-  // rather than left subscribed to a person who can no longer sign in.
+  // rather than left subscribed to a person who can no longer sign in. Its shift
+  // ends with it, so the panel does not show somebody on duty who cannot sign in.
+  // Losing the support role ends it too: the group is what a shift belongs to.
   if (patch.active === false) {
     await deleteUserInstallations(userId)
-  } else if (nextTags !== undefined) {
-    await syncUserInstallations(userId, nextTags)
+    await endSession(userId, 'deactivated')
+  } else {
+    if (nextTags !== undefined) await syncUserInstallations(userId, nextTags)
+    if (patch.roles && !patch.roles.includes(SUPPORT_ROLE)) {
+      await endSession(userId, 'role-removed')
+    }
   }
 
   const updated = await loadAdminUser(userId)

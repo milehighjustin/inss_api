@@ -29,6 +29,7 @@ import { qrRoutes } from './routes/qr.ts'
 import { qrPublicRoutes } from './routes/qrPublic.ts'
 import { rtcCallRoutes } from './routes/rtcCalls.ts'
 import { rtcRoutes } from './routes/rtc.ts'
+import { supportRoutes } from './routes/support.ts'
 import { attachRtcSignaling } from './rtcSignaling.ts'
 
 /**
@@ -96,6 +97,11 @@ app.route('/api/mobile/alerts', alertRoutes)
 // minutes, per person and per property.
 app.route('/api/mobile/admin/performance', performanceRoutes)
 
+// Support sessions: the shift a support account opens to receive alerts, and
+// the numbers it produced. The report above lives in the Support panel now, but
+// its path stays — the panel is where it is read, not where it is served.
+app.route('/api/mobile/support', supportRoutes)
+
 // The notification tags: the vocabulary Users assigns, QR codes choose and the
 // composer sends to. Administration only.
 app.route('/api/mobile/admin/notification-tags', notificationTagRoutes)
@@ -104,7 +110,6 @@ app.route('/api/mobile/admin/notifications', adminNotificationRoutes)
 // A phone registering to be told. The tags come from the account, never from the
 // device, and delivery itself lives in `notifications.ts`.
 app.route('/api/mobile/notifications', installationRoutes)
-
 // Desktop alerts: the web build on Windows, macOS and Linux subscribing to be
 // told. Delivery itself is inside `notifications.ts`, where a scan starts it.
 app.route('/api/mobile/push', pushRoutes)

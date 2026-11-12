@@ -9,6 +9,7 @@ import type { QrCode, QrNotificationPriority } from './qr.ts'
 import { qrNames } from './qr.ts'
 import { recordOffers, type AlertRef } from './activity.ts'
 import { ringUsers } from './rtcSignaling.ts'
+import { onDuty } from './support.ts'
 
 /**
  * The notifications a scan produces, and the one place they leave the system.
@@ -312,9 +313,15 @@ export async function notificationsForCode(
  * redirect is answered whatever the push services say.
  */
 async function deliver(record: NotificationRecord): Promise<void> {
-  const audience = [
+  const addressed = [
     ...new Set([...(await usersWithTags(record.tags)), ...record.recipients]),
   ]
+
+  // A support account hears what its tags address only while its shift is open.
+  // This is resolved here, before anything is offered or rung, so an off-duty
+  // person is never counted as having missed an alert they were not sent.
+  const duty = await onDuty(addressed)
+  const audience = duty.onDuty
 
   const alert = {
     id: record._id,
@@ -391,7 +398,11 @@ async function deliver(record: NotificationRecord): Promise<void> {
   const hubTags = [...ntTags, ...named].slice(0, 20)
   // What the hub is actually addressed by, exclusions and all: the log should
   // say where an alert was sent, not where it would have gone without a call.
-  const expression = hubTags.length > 0 ? tagExpressionFor(hubTags, held) : ''
+  // Phones are addressed by tag expression, so an exclusion has to travel inside
+  // it: whoever was answered on a call, and whoever is off duty, cannot simply be
+  // filtered out of a list after the fact.
+  const excluded = [...held, ...duty.offDuty]
+  const expression = hubTags.length > 0 ? tagExpressionFor(hubTags, excluded) : ''
 
   const data: Record<string, string> = { kind: record.kind }
   if (record.qrCodeId) data.qrCodeId = record.qrCodeId
@@ -420,7 +431,7 @@ async function deliver(record: NotificationRecord): Promise<void> {
       url,
     }),
     hubTags.length > 0
-      ? sendByTags(hubTags, { ...message, url }, { excludeUserIds: held, platforms })
+      ? sendByTags(hubTags, { ...message, url }, { excludeUserIds: excluded, platforms })
       : Promise.resolve(null),
   ])
 
@@ -454,6 +465,9 @@ async function deliver(record: NotificationRecord): Promise<void> {
   } else if (attempted > 0) {
     update.status = 'failed'
     update.note = `Nothing could be reached: ${sends.find((send) => send.error)?.error ?? 'the push services refused it'}`
+  } else if (audience.length === 0 && duty.offDuty.length > 0) {
+    update.note =
+      'Everyone this was addressed to is off duty: a support account only hears an alert while its session is open.'
   } else if (audience.length === 0) {
     update.note =
       record.kind === 'document'

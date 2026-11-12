@@ -428,3 +428,111 @@ export async function performance(from: Date, to: Date): Promise<PerformanceRepo
 function seconds(value: number | null): number | null {
   return value === null ? null : Math.round(value / 100) / 10
 }
+
+/**
+ * What one person did in one window — the tally behind a support session.
+ *
+ * The same six kinds as the report, plus the two counts a supervisor asks for
+ * about a single shift: how many alerts actually reached them, and how many of
+ * those they clicked (answered or ignored — a tap is a tap, whatever came of it).
+ */
+export interface PersonActivity {
+  userId: string
+  offered: number
+  held: number
+  answered: number
+  ignored: number
+  /** Offered but never answered or ignored. */
+  missed: number
+  answerRate: number | null
+  medianAnswerSeconds: number | null
+  averageAnswerSeconds: number | null
+  calls: number
+  talkSeconds: number
+  /** Distinct alerts that reached them, whether offered or held during a call. */
+  notifications: number
+  /** Alerts they clicked: answered plus ignored. */
+  clicked: number
+  firstActivityAt: string | null
+  lastActivityAt: string | null
+}
+
+/**
+ * One person's events in `[from, to)`, tallied.
+ *
+ * Narrowed in the query rather than filtered in memory, which is what makes this
+ * cheap enough to run per session: a shift is a small slice of the log, and the
+ * report's 50,000-event ceiling is for everyone at once.
+ */
+export async function personActivity(
+  userId: string,
+  from: Date,
+  to: Date,
+): Promise<PersonActivity> {
+  const events = await (await activity())
+    .find({ userId, at: { $gte: from, $lt: to } })
+    .sort({ at: 1 })
+    .limit(MAX_EVENTS)
+    .toArray()
+
+  let offered = 0
+  let held = 0
+  let answered = 0
+  let ignored = 0
+  let calls = 0
+  let talkMs = 0
+  const latencies: number[] = []
+  const alerts = new Set<string>()
+
+  for (const event of events) {
+    switch (event.kind) {
+      case 'alert-offered':
+        offered += 1
+        break
+      case 'alert-held':
+        held += 1
+        break
+      case 'alert-answered':
+        answered += 1
+        if (typeof event.latencyMs === 'number') latencies.push(event.latencyMs)
+        break
+      case 'alert-ignored':
+        ignored += 1
+        break
+      case 'call-started':
+        calls += 1
+        break
+      case 'call-ended':
+        if (typeof event.durationMs === 'number') talkMs += event.durationMs
+        break
+    }
+
+    // An alert is one row per person, so the offer is the row that says it
+    // reached them; an answer without an offer in the window belongs to an alert
+    // offered before the shift began and is not counted as one they were given.
+    if (event.notificationId && (event.kind === 'alert-offered' || event.kind === 'alert-held')) {
+      alerts.add(event.notificationId)
+    }
+  }
+
+  const first = events[0]
+  const last = events[events.length - 1]
+
+  return {
+    userId,
+    offered,
+    held,
+    answered,
+    ignored,
+    missed: Math.max(0, offered - answered - ignored),
+    answerRate: rate(answered, offered),
+    medianAnswerSeconds: seconds(median(latencies)),
+    averageAnswerSeconds: seconds(average(latencies)),
+    calls,
+    talkSeconds: Math.round(talkMs / 1000),
+    notifications: alerts.size,
+    clicked: answered + ignored,
+    firstActivityAt: first ? first.at.toISOString() : null,
+    lastActivityAt: last ? last.at.toISOString() : null,
+  }
+}

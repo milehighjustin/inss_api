@@ -14,7 +14,13 @@ import { readJson } from '../http.ts'
  * board.
  */
 
-/** The roles that may read the performance report. */
+/**
+ * The roles that may read the performance report.
+ *
+ * The report lives in the Support panel now, but the panel is a container, not a
+ * widening: the same three roles read it there that read it in Admin, and the
+ * support group sees their own shift on their own screen.
+ */
 const REPORT_ROLES = ['administrator', 'manager', 'supervisor'] as const
 
 export const alertRoutes = new Hono()

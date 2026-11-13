@@ -32,8 +32,9 @@ export const SUPPORT_ROLE = 'support'
 /**
  * Who may open the Support panel and run their own session.
  *
- * Managers and supervisors are here because the performance report lives in this
- * panel now, and they could read it from Admin before the move.
+ * Managers and supervisors keep their way in because they are the desk's
+ * supervisors and can still take a shift themselves; the numbers everyone's
+ * shifts add up to live in Admin → Support, which is administrator-only.
  */
 export const SUPPORT_ROLES = ['support', 'administrator', 'manager', 'supervisor'] as const
 
@@ -229,19 +230,46 @@ export async function activeSessions(): Promise<SupportSession[]> {
   return summarizeMany(rows)
 }
 
-/** Past and current sessions, newest first, optionally one person's. */
+/** One page of shift history, and how many rows there are in all. */
+export interface SessionPage {
+  sessions: SupportSession[]
+  total: number
+  page: number
+  pageSize: number
+}
+
+/** The page size both the desk and the admin list use. */
+export const SESSIONS_PAGE_SIZE = 25
+
+/**
+ * Past and current sessions, newest first, one page at a time, optionally one
+ * person's.
+ *
+ * `total` is counted rather than guessed from a short page: the list has to say
+ * "page 2 of 9" before the reader gets to the end of it. Ties are broken by id so
+ * two shifts starting in the same second cannot swap places between pages.
+ */
 export async function sessionHistory({
-  limit = 20,
+  page = 1,
+  pageSize = SESSIONS_PAGE_SIZE,
   userId,
-}: { limit?: number; userId?: string } = {}): Promise<SupportSession[]> {
-  const capped = Math.min(Math.max(limit, 1), 100)
-  const rows = await (await sessions())
-    .find(userId ? { userId } : {})
-    .sort({ startedAt: -1 })
-    .limit(capped)
+}: { page?: number; pageSize?: number; userId?: string } = {}): Promise<SessionPage> {
+  const size = Math.min(Math.max(Math.round(pageSize), 1), 100)
+  const filter = userId ? { userId } : {}
+  const collection = await sessions()
+
+  const total = await collection.countDocuments(filter)
+  const lastPage = Math.max(1, Math.ceil(total / size))
+  const current = Math.min(Math.max(Math.round(page), 1), lastPage)
+
+  const rows = await collection
+    .find(filter)
+    .sort({ startedAt: -1, _id: -1 })
+    .skip((current - 1) * size)
+    .limit(size)
     .toArray()
 
-  return summarizeMany(rows)
+  return { sessions: await summarizeMany(rows), total, page: current, pageSize: size }
 }
 
 export async function sessionById(sessionId: string): Promise<SupportSession | null> {

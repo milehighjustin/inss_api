@@ -1,7 +1,8 @@
 import { Hono } from 'hono'
 
 import { requireRoles, type SessionUser } from '../auth/session.ts'
-import { DeskAlertError, claimDeskAlert, recentDeskAlerts } from '../deskAlerts.ts'
+import { alertLog } from '../alertLog.ts'
+import { DeskAlertError, claimDeskAlert } from '../deskAlerts.ts'
 import { fail } from '../http.ts'
 import {
   SESSION_STAFF_ROLES,
@@ -17,15 +18,16 @@ import {
 /**
  * The Support panel's API.
  *
- * Two audiences again:
+ * Two audiences:
  *
- * - **Your own shift** — start it, end it, read it. Anyone the Support panel is
- *   open to, which is the support group plus the people who already read the
- *   performance report.
- * - **Everyone's shifts** — the live list, the history and one session's detail.
- *   Administrators, managers and supervisors, matching the report beside it. A
- *   support account may still read its own session, which is what the detail
- *   route allows below even though the list does not.
+ * - **Your own shift** — start it, end it, read it, and read the list of your own
+ *   past ones. Anyone the Support panel is open to, which is the support group
+ *   plus the people who may also take a shift.
+ * - **Everyone's shifts** — the live list and the history of every account.
+ *   Administrators, managers and supervisors, which is what Admin → Support
+ *   shows. The history route below narrows a non-staff caller to their own rows
+ *   rather than refusing them, so the desk's own page can page through its
+ *   shifts without a second endpoint.
  */
 
 export const supportRoutes = new Hono()
@@ -67,26 +69,28 @@ supportRoutes.post('/sessions/end', async (c) => {
 })
 
 /**
- * GET /api/mobile/support/alerts?minutes=120&limit=40
+ * GET /api/mobile/support/alerts?page=&pageSize=
  *
- * Success: { alerts } — the desk board: alerts addressed to this person's tags in
- * the window, newest first, with what became of each. `canAccept` is the one that
- * matters: it is true when nobody has answered and this person has not settled it,
- * which is exactly the alert a person starting a shift can still take.
+ * Success: { alerts, total, page, pageSize, counts, people } — every alert
+ * addressed to this person's tags, newest first, twenty-five to a page, with what
+ * became of each. `canAccept` is the one that matters: true when nobody has
+ * answered, this person has not settled it, and it is still inside the five
+ * minutes — exactly the alert they can take from the list.
  */
 supportRoutes.get('/alerts', async (c) => {
   const user = await requireRoles(c, SUPPORT_ROLES)
   if (user instanceof Response) return user
 
-  const minutes = Number(c.req.query('minutes') ?? '0')
-  const limit = Number(c.req.query('limit') ?? '0')
+  const page = Number(c.req.query('page') ?? '1')
+  const pageSize = Number(c.req.query('pageSize') ?? '')
 
-  return c.json({
-    alerts: await recentDeskAlerts(user, {
-      ...(Number.isFinite(minutes) && minutes > 0 ? { minutes } : {}),
-      ...(Number.isFinite(limit) && limit > 0 ? { limit } : {}),
+  return c.json(
+    await alertLog({
+      mine: user,
+      page: Number.isFinite(page) && page > 0 ? page : 1,
+      ...(Number.isFinite(pageSize) && pageSize > 0 ? { pageSize } : {}),
     }),
-  })
+  )
 })
 
 /**
@@ -125,24 +129,30 @@ supportRoutes.get('/sessions/active', async (c) => {
 })
 
 /**
- * GET /api/mobile/support/sessions?userId=&limit=
+ * GET /api/mobile/support/sessions?page=&pageSize=&userId=
  *
- * Success: { sessions } — newest first. `userId` is how the performance report
- * drills into one person.
+ * Success: { sessions, total, page, pageSize } — newest first, 25 to a page by
+ * default. `userId` is how the performance report drills into one person, and it
+ * is ignored for a caller who may not read everyone: they get their own history.
  */
 supportRoutes.get('/sessions', async (c) => {
-  const gate = await staff(c)
-  if (gate instanceof Response) return gate
+  const user = await requireRoles(c, SUPPORT_ROLES)
+  if (user instanceof Response) return user
 
-  const limit = Number(c.req.query('limit') ?? '20')
-  const userId = c.req.query('userId')?.trim()
+  const staff = SESSION_STAFF_ROLES.some((role) => user.roles.includes(role))
+  const asked = c.req.query('userId')?.trim()
+  const userId = staff ? asked : user.userId
 
-  return c.json({
-    sessions: await sessionHistory({
-      limit: Number.isFinite(limit) ? limit : 20,
+  const page = Number(c.req.query('page') ?? '1')
+  const pageSize = Number(c.req.query('pageSize') ?? '')
+
+  return c.json(
+    await sessionHistory({
+      page: Number.isFinite(page) && page > 0 ? page : 1,
+      ...(Number.isFinite(pageSize) && pageSize > 0 ? { pageSize } : {}),
       ...(userId ? { userId } : {}),
     }),
-  })
+  )
 })
 
 /**

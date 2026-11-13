@@ -4,28 +4,26 @@ import { db } from './db.ts'
 import { peopleById } from './support.ts'
 
 /**
- * The desk board: the alerts still worth picking up.
+ * Taking an alert from the desk.
  *
  * An alert is addressed to tags, and delivery goes to whoever is on duty when it
- * is raised. That leaves a gap that matters at the change of a shift: a code
- * scanned at 07:58 belongs to the person who starts at 08:00 as much as to the
- * one who was on at the time — the visitor may still be standing at the sign.
+ * is raised. The list a person reads is `alertLog.ts`; this module is the part
+ * that lets them take one — an offer at the moment they took it, and an answer
+ * whose response time starts at the alert, not at the claim, because that is how
+ * long the visitor waited.
  *
- * So this is not a second inbox and nothing is re-sent: it is a reading of the
- * alerts **already addressed to this person's tags** in the last couple of hours,
- * with what became of each. Claiming one records the answer against them — an
- * offer at the moment they took it, and an answer whose response time starts at
- * the alert, not at the claim, because that is how long the visitor waited.
- *
- * Documents are not here. A posted statement is addressed to investors and is not
- * a desk alert; the board only carries what a scan or a manual send raised.
+ * **Five minutes is the whole life of an alert.** Two hours read as a backlog: a
+ * visitor at a sign is gone long before that, and an answer an hour late is not an
+ * answer — it is a number moving in a report. Five minutes is long enough to walk
+ * to the desk, short enough that an alert nobody took stops pretending to be
+ * takeable.
  */
 
-/** How far back the board looks. Two hours covers a shift change comfortably. */
-export const ALERT_WINDOW_MINUTES = 120
-
-/** How many rows the board will carry at once. */
-export const MAX_DESK_ALERTS = 40
+/**
+ * How long an alert can still be answered. One number: the list stops offering it
+ * and the server stops accepting a claim at the same instant.
+ */
+export const ALERT_ANSWER_MINUTES = 5
 
 /** The bits of a notification this module reads. */
 interface NotificationRow {
@@ -68,12 +66,7 @@ export interface DeskAlert {
   answeredBy?: string
   /** What this person did, if anything. */
   mine: 'answered' | 'ignored' | null
-  /**
-   * True when this person could still take it: nobody has answered, and they
-   * have not settled it themselves. An alert somebody else ignored stays
-   * claimable — they saw it and did nothing, which is not a decision about the
-   * visitor standing at the sign.
-   */
+  /** True when this person could still take it: unanswered, unsettled by them, in time. */
   canAccept: boolean
   tags: string[]
 }
@@ -99,46 +92,12 @@ function refOf(row: NotificationRow) {
   }
 }
 
-/**
- * The alerts addressed to this person in the window, newest first.
- *
- * "Addressed to" is the same rule delivery uses: a tag overlap, or a named
- * recipient from a code configured before tags existed. Nothing is filtered by
- * who was on duty — that is exactly the point of the board.
- */
-export async function recentDeskAlerts(
+/** Rows in, board out — settled state read in one query. */
+async function shapeAlerts(
   user: SessionUser,
-  { minutes = ALERT_WINDOW_MINUTES, limit = MAX_DESK_ALERTS }: { minutes?: number; limit?: number } = {},
+  rows: NotificationRow[],
+  maxAgeSeconds: number,
 ): Promise<DeskAlert[]> {
-  const window = Math.min(Math.max(Math.round(minutes), 5), 24 * 60)
-  const capped = Math.min(Math.max(Math.round(limit), 1), 100)
-  const since = new Date(Date.now() - window * 60_000)
-
-  const global = await db('global')
-
-  const rows = await global
-    .collection<NotificationRow>('notifications')
-    .find({
-      kind: { $ne: 'document' },
-      createdAt: { $gte: since },
-      $or: [
-        ...(user.notificationTags.length > 0
-          ? [{ tags: { $in: user.notificationTags } }]
-          : []),
-        // Always present, so the `$or` is never an empty array on an account
-        // with no tags and no named sends.
-        { recipients: user.userId },
-      ],
-    })
-    .sort({ createdAt: -1 })
-    .limit(capped)
-    .toArray()
-
-  return shapeAlerts(user, rows)
-}
-
-/** Rows in, board out — settled state read in one query per batch. */
-async function shapeAlerts(user: SessionUser, rows: NotificationRow[]): Promise<DeskAlert[]> {
   if (rows.length === 0) return []
 
   const global = await db('global')
@@ -183,6 +142,7 @@ async function shapeAlerts(user: SessionUser, rows: NotificationRow[]): Promise<
     const entry = settled.get(row._id)
     const outcome: AlertOutcome = entry?.answered ? 'answered' : entry?.ignored ? 'ignored' : 'open'
     const mine = entry?.mine ?? null
+    const ageSeconds = Math.max(0, Math.round((now - row.createdAt.getTime()) / 1000))
 
     return {
       notificationId: row._id,
@@ -193,22 +153,23 @@ async function shapeAlerts(user: SessionUser, rows: NotificationRow[]): Promise<
       ...(row.qrCodeName ? { qrCodeName: row.qrCodeName } : {}),
       ...(row.locationName ? { locationName: row.locationName } : {}),
       createdAt: row.createdAt.toISOString(),
-      ageSeconds: Math.max(0, Math.round((now - row.createdAt.getTime()) / 1000)),
+      ageSeconds,
       outcome,
       ...(entry?.answeredBy ? { answeredBy: entry.answeredBy } : {}),
       mine,
-      canAccept: mine === null && outcome !== 'answered',
+      canAccept: mine === null && outcome !== 'answered' && ageSeconds <= maxAgeSeconds,
       tags: row.tags ?? [],
     }
   })
 }
 
 /**
- * Takes an alert from the board.
+ * Takes an alert from the list.
  *
- * Refusals are about ownership, not age: an alert older than the window is not
- * on the board to claim, and one somebody has already answered is theirs. One
- * this person already settled is returned as it stands rather than recorded twice.
+ * Refusals are about ownership and age: an alert nobody addressed to this person
+ * is not theirs to take, one that is five minutes old can no longer be answered,
+ * and one somebody answered is theirs. One this person already settled is
+ * returned as it stands rather than recorded twice.
  */
 export async function claimDeskAlert(
   user: SessionUser,
@@ -236,11 +197,19 @@ export async function claimDeskAlert(
   })
 
   // Already settled by this person: answer with the board row, which says so.
-  if (mine) return boardRow(user, row)
+  if (mine) return boardRow(user, row, ALERT_ANSWER_MINUTES * 60)
 
   const answered = await activity.findOne({ notificationId, kind: 'alert-answered' })
   if (answered) {
     throw new DeskAlertError('Somebody else has already answered that alert', 409)
+  }
+
+  const ageSeconds = Math.max(0, Math.round((Date.now() - row.createdAt.getTime()) / 1000))
+  if (ageSeconds > ALERT_ANSWER_MINUTES * 60) {
+    throw new DeskAlertError(
+      `That alert is more than ${ALERT_ANSWER_MINUTES} minutes old, so it can no longer be answered`,
+      409,
+    )
   }
 
   const now = new Date()
@@ -263,12 +232,16 @@ export async function claimDeskAlert(
     },
   ])
 
-  return boardRow(user, row)
+  return boardRow(user, row, ALERT_ANSWER_MINUTES * 60)
 }
 
-/** One row of the board after the fact, shaped the same way the list is. */
-async function boardRow(user: SessionUser, row: NotificationRow): Promise<DeskAlert> {
-  const [shaped] = await shapeAlerts(user, [row])
+/** One row of the list after the fact, shaped the same way the list is. */
+async function boardRow(
+  user: SessionUser,
+  row: NotificationRow,
+  maxAgeSeconds: number,
+): Promise<DeskAlert> {
+  const [shaped] = await shapeAlerts(user, [row], maxAgeSeconds)
   if (!shaped) throw new DeskAlertError('That alert is not there', 404)
   return shaped
 }

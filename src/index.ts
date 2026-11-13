@@ -30,6 +30,7 @@ import { qrPublicRoutes } from './routes/qrPublic.ts'
 import { rtcCallRoutes } from './routes/rtcCalls.ts'
 import { rtcRoutes } from './routes/rtc.ts'
 import { supportRoutes } from './routes/support.ts'
+import { supportAdminRoutes } from './routes/supportAdmin.ts'
 import { attachRtcSignaling } from './rtcSignaling.ts'
 
 /**
@@ -101,6 +102,10 @@ app.route('/api/mobile/admin/performance', performanceRoutes)
 // the numbers it produced. The report above lives in the Support panel now, but
 // its path stays — the panel is where it is read, not where it is served.
 app.route('/api/mobile/support', supportRoutes)
+
+// The other side of the same table: every alert, searchable and filtered, for
+// Admin → Support. Administrator only, like the panel it feeds.
+app.route('/api/mobile/admin/support', supportAdminRoutes)
 
 // The notification tags: the vocabulary Users assigns, QR codes choose and the
 // composer sends to. Administration only.

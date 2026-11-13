@@ -12,8 +12,13 @@ import { db } from './db.ts'
  * Only `kpiActive` facilities are included: the others are not operating yet.
  */
 
-/** Who may read the KPI board. */
-export const KPI_ROLES = ['administrator', 'manager', 'supervisor'] as const
+/**
+ * Who may read the KPI board.
+ *
+ * `kpi` is the group an administrator assigns to a user; the rest keep their way
+ * in, because they could read the board before the role existed.
+ */
+export const KPI_ROLES = ['kpi', 'administrator', 'manager', 'supervisor'] as const
 
 export interface KpiFacility {
   id: string

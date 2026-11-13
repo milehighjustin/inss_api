@@ -17,7 +17,7 @@ import { mintKioskToken, mintOperatorToken } from '../rtcTokens.ts'
  */
 
 /** Who may place calls from the console: v1's Kiosk Connect audience. */
-const OPERATOR_ROLES = ['administrator', 'developer', 'manager', 'supervisor'] as const
+const OPERATOR_ROLES = ['kiosk', 'administrator', 'developer', 'manager', 'supervisor'] as const
 
 export const rtcCallRoutes = new Hono()
 

@@ -38,6 +38,8 @@ export const ASSIGNABLE_ROLES = [
   'administrator',
   'developer',
   'investor',
+  'kiosk',
+  'kpi',
   'manager',
   'support',
   'supervisor',

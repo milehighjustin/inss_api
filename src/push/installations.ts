@@ -91,11 +91,33 @@ function summarize(row: InstallationRecord, synced: boolean): InstallationSummar
 }
 
 /**
+ * How recently a matching registration must have succeeded to be answered
+ * without doing it again.
+ *
+ * Registration is idempotent, which is what makes a loop harmless to the data —
+ * but every repetition still costs a write and a call to the hub. A device that
+ * asks twice in a minute with the same token and the same tags is asking a
+ * question whose answer is already on file.
+ */
+const REPEAT_WINDOW_MS = 60_000
+
+/** Same members, whatever order the account's tags are in. */
+function sameTags(a: string[], b: string[]): boolean {
+  return a.length === b.length && a.every((tag) => b.includes(tag))
+}
+
+/**
  * Records this device and pushes its tags to the hub.
  *
  * Idempotent: the id is generated once on the device, so a foreground, a token
  * rollover and a tag change are all the same upsert. `synced` says whether the
  * hub accepted it — the app can say "we'll keep trying" rather than pretending.
+ *
+ * A registration repeating what was already accepted is answered from the stored
+ * row rather than rewritten, so a client that asks in a loop costs a read per
+ * request instead of a write plus a hub round trip per request. That is a floor
+ * under the API, not a substitute for the app not looping: the log still shows
+ * every request.
  */
 export async function saveInstallation(
   userId: string,
@@ -125,6 +147,20 @@ export async function saveInstallation(
   const tags = installationTags(userId, user.notificationTags ?? [])
   const collection = await installations()
   const now = new Date()
+
+  const existing = await collection.findOne({ _id: installationId })
+  const unchanged =
+    existing !== null &&
+    existing.userId === userId &&
+    existing.pushChannel === pushChannel &&
+    !existing.syncError &&
+    existing.tagsSyncedAt !== null &&
+    now.getTime() - existing.tagsSyncedAt.getTime() < REPEAT_WINDOW_MS &&
+    sameTags(existing.tags, tags)
+
+  if (unchanged) {
+    return { installation: summarize(existing, true), synced: true }
+  }
 
   await collection.updateOne(
     { _id: installationId },

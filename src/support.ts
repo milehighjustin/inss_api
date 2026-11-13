@@ -170,6 +170,61 @@ export async function mySession(userId: string): Promise<SupportSession | null> 
   return row ? summarize(row) : null
 }
 
+export interface UserShifts {
+  /** Shifts that overlap the window. */
+  count: number
+  /** Seconds of desk time inside the window, clipped to it. */
+  seconds: number
+  /** True when one of them is still open. */
+  active: boolean
+  lastStartedAt: string | null
+}
+
+/**
+ * How long a person held the desk inside a window.
+ *
+ * A shift that started before the window and ended inside it still contributed
+ * that part of itself, so the overlap is clipped rather than the shift counted
+ * whole: "how long were they on duty this week" has to be the week, not the
+ * shifts that happen to begin in it.
+ */
+export async function userShifts(
+  userId: string,
+  from: Date,
+  to: Date,
+): Promise<UserShifts> {
+  const rows = await (await sessions())
+    .find({ userId, startedAt: { $lt: to } })
+    .sort({ startedAt: -1 })
+    .limit(500)
+    .toArray()
+
+  let count = 0
+  let seconds = 0
+  let active = false
+  let lastStartedAt: Date | null = null
+
+  for (const row of rows) {
+    const end = row.endedAt ?? to
+    if (end <= from) continue
+
+    count += 1
+    if (row.endedAt === null) active = true
+    if (!lastStartedAt || row.startedAt > lastStartedAt) lastStartedAt = row.startedAt
+
+    const start = Math.max(row.startedAt.getTime(), from.getTime())
+    const stop = Math.min(end.getTime(), to.getTime())
+    seconds += Math.max(0, Math.round((stop - start) / 1000))
+  }
+
+  return {
+    count,
+    seconds,
+    active,
+    lastStartedAt: lastStartedAt ? lastStartedAt.toISOString() : null,
+  }
+}
+
 /**
  * Opens a shift, closing any that was already open.
  *

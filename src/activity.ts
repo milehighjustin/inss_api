@@ -435,6 +435,126 @@ function seconds(value: number | null): number | null {
   return value === null ? null : Math.round(value / 100) / 10
 }
 
+/** One calendar day of a person's activity. */
+export interface PersonDay {
+  /** `YYYY-MM-DD`, in UTC, so a day is the same day on every server. */
+  date: string
+  offered: number
+  held: number
+  answered: number
+  ignored: number
+  missed: number
+  answerRate: number | null
+  medianAnswerSeconds: number | null
+  calls: number
+  talkSeconds: number
+  /** Distinct alerts that reached them that day. */
+  notifications: number
+  clicked: number
+}
+
+/**
+ * One person's activity, cut into calendar days.
+ *
+ * The same events and the same tallies as `personActivity`, bucketed by day and
+ * zero-filled across the whole window: a day with nothing in it is a fact about
+ * the desk, and leaving it out would make a gap look like a weekend. A shift
+ * that crosses midnight is counted on both days, which is what a day view is
+ * for — the question is "what happened on Tuesday", not "which shift was it".
+ */
+export async function personDaily(
+  userId: string,
+  from: Date,
+  to: Date,
+): Promise<PersonDay[]> {
+  const events = await (await activity())
+    .find({ userId, at: { $gte: from, $lt: to } })
+    .sort({ at: 1 })
+    .limit(MAX_EVENTS)
+    .toArray()
+
+  interface Tally {
+    offered: number
+    held: number
+    answered: number
+    ignored: number
+    calls: number
+    talkMs: number
+    latencies: number[]
+    alerts: Set<string>
+  }
+
+  const blank = (): Tally => ({
+    offered: 0,
+    held: 0,
+    answered: 0,
+    ignored: 0,
+    calls: 0,
+    talkMs: 0,
+    latencies: [],
+    alerts: new Set(),
+  })
+
+  const days = new Map<string, Tally>()
+
+  const dayKey = (at: Date) => at.toISOString().slice(0, 10)
+
+  // Every day in the window, so the caller can render the quiet ones.
+  const cursor = new Date(Date.UTC(from.getUTCFullYear(), from.getUTCMonth(), from.getUTCDate()))
+  const last = new Date(Date.UTC(to.getUTCFullYear(), to.getUTCMonth(), to.getUTCDate()))
+  while (cursor <= last) {
+    days.set(dayKey(cursor), blank())
+    cursor.setUTCDate(cursor.getUTCDate() + 1)
+  }
+
+  for (const event of events) {
+    const key = dayKey(event.at)
+    const tally = days.get(key) ?? blank()
+    days.set(key, tally)
+
+    switch (event.kind) {
+      case 'alert-offered':
+        tally.offered += 1
+        break
+      case 'alert-held':
+        tally.held += 1
+        break
+      case 'alert-answered':
+        tally.answered += 1
+        if (typeof event.latencyMs === 'number') tally.latencies.push(event.latencyMs)
+        break
+      case 'alert-ignored':
+        tally.ignored += 1
+        break
+      case 'call-started':
+        tally.calls += 1
+        break
+      case 'call-ended':
+        if (typeof event.durationMs === 'number') tally.talkMs += event.durationMs
+        break
+    }
+
+    if (event.notificationId && (event.kind === 'alert-offered' || event.kind === 'alert-held')) {
+      tally.alerts.add(event.notificationId)
+    }
+  }
+
+  return [...days.entries()].map(([date, tally]) => ({
+    date,
+    offered: tally.offered,
+    held: tally.held,
+    answered: tally.answered,
+    ignored: tally.ignored,
+    missed: Math.max(0, tally.offered - tally.answered - tally.ignored),
+    answerRate: rate(tally.answered, tally.offered),
+    medianAnswerSeconds: seconds(median(tally.latencies)),
+    calls: tally.calls,
+    talkSeconds: Math.round(tally.talkMs / 1000),
+    notifications: tally.alerts.size,
+    clicked: tally.answered + tally.ignored,
+  }))
+}
+
 /**
  * What one person did in one window — the tally behind a support session.
  *

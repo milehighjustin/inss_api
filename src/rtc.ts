@@ -158,9 +158,12 @@ export class RtcError extends Error {
 }
 
 /** Active devices, by name. */
-export async function rtcDevices(): Promise<RtcDevice[]> {
+export async function rtcDevices(includeInactive = false): Promise<RtcDevice[]> {
   const global = await db('global')
-  const rows = await global.collection<DeviceDocument>('rtcDevices').find({ active: true }).toArray()
+  const rows = await global
+    .collection<DeviceDocument>('rtcDevices')
+    .find(includeInactive ? {} : { active: true })
+    .toArray()
 
   return rows
     .map((row) => deviceFromRow(row))

@@ -1,26 +1,20 @@
 import { PdkError, pdkConfigured, pdkSystem } from './api.ts'
-import { listDoors } from './doors.ts'
-import { listHolders } from './holders.ts'
-import { readSelectedSystem } from './store.ts'
+import { listLocationSystems } from './links.ts'
 
 /**
  * What the Integrations panel says about PDK.
  *
- * Two separate questions, and the panel asks both because the answers need
- * different actions:
+ * Two separate questions, because they need different answers:
  *
  * - **configured** — the server has the API client credentials. Only a
  *   deployment can fix that.
- * - **system selected** — an administrator has picked which system to work on.
- *   That is a choice in the app, from the list PDK returns.
+ * - **linked** — how many properties have been pointed at a PDK system. That is
+ *   a choice in the app, made per property.
  *
- * Connected is read live: the chosen system is fetched, then counted. A panel
- * that says "connected" because a document exists is a panel that lies the first
- * time a credential is rotated.
- *
- * The counts are one page deep (PDK's own maximum of 100 per request) and come
- * with the real totals, so a site larger than one page can be described honestly
- * rather than implying the page is the system.
+ * `reachable` is read live: each distinct system is fetched once, so a green
+ * light means PDK actually answered for it. A panel that says "connected"
+ * because a document exists is a panel that lies the first time a credential is
+ * rotated.
  */
 
 export interface PdkStatus {
@@ -28,17 +22,10 @@ export interface PdkStatus {
   name: string
   /** The deployment variables are present. */
   configured: boolean
-  /** A system has been chosen in the app. */
-  systemSelected: boolean
-  /** PDK answered for the chosen system. */
-  connected: boolean
-  systemId: string | null
-  systemName: string | null
-  organizationId: string | null
-  selectedBy: string | null
-  selectedAt: string | null
-  doors: { shown: number; total: number | null }
-  holders: { shown: number; total: number | null }
+  /** Properties with a PDK system linked. */
+  linked: number
+  /** Of those, the properties whose system PDK answered for. */
+  reachable: number
   needsAttention: string | null
   checkedAt: string
 }
@@ -46,48 +33,57 @@ export interface PdkStatus {
 export async function pdkStatus(): Promise<PdkStatus> {
   const checkedAt = new Date().toISOString()
   const configured = pdkConfigured()
-  const selected = await readSelectedSystem()
+  const links = await listLocationSystems()
 
   const status: PdkStatus = {
     id: 'pdk',
     name: 'PDK Access Control',
     configured,
-    systemSelected: selected !== null,
-    connected: false,
-    systemId: selected?.systemId ?? null,
-    systemName: selected?.systemName ?? null,
-    organizationId: selected?.organizationId ?? null,
-    selectedBy: selected?.selectedBy ?? null,
-    selectedAt: selected?.selectedAt ? selected.selectedAt.toISOString() : null,
-    doors: { shown: 0, total: null },
-    holders: { shown: 0, total: null },
-    needsAttention: !configured
-      ? 'PDK is not configured on the server. Add PDK_CLIENT_ID and PDK_CLIENT_SECRET, then check again.'
-      : selected
-        ? null
-        : 'No PDK system is selected yet. Choose the system this app should work on.',
+    linked: links.length,
+    reachable: 0,
+    needsAttention: null,
     checkedAt,
   }
 
-  if (!configured || !selected) return status
-
-  try {
-    const system = await pdkSystem(selected.systemId)
-    const doors = await listDoors()
-    const holders = await listHolders()
-
+  if (!configured) {
     return {
       ...status,
-      connected: true,
-      systemName: system.data.name ?? selected.systemName,
-      organizationId:
-        typeof system.data.ouId === 'string' ? system.data.ouId : selected.organizationId,
-      doors: { shown: doors.doors.length, total: doors.total ?? doors.doors.length },
-      holders: { shown: holders.holders.length, total: holders.total ?? holders.holders.length },
+      needsAttention:
+        'PDK is not configured on the server. Add PDK_CLIENT_ID and PDK_CLIENT_SECRET, then check again.',
     }
-  } catch (cause) {
-    const message =
-      cause instanceof PdkError ? cause.message : 'PDK could not be checked just now.'
-    return { ...status, needsAttention: message }
+  }
+
+  if (links.length === 0) {
+    return {
+      ...status,
+      needsAttention: 'No property has a PDK system linked yet. Link one on this page.',
+    }
+  }
+
+  // One check per system, however many properties share it.
+  const systemIds = [...new Set(links.map((link) => link.systemId))]
+  const answers = await Promise.all(
+    systemIds.map(async (systemId) => {
+      try {
+        await pdkSystem(systemId)
+        return { systemId, ok: true as const, message: null }
+      } catch (cause) {
+        return {
+          systemId,
+          ok: false as const,
+          message:
+            cause instanceof PdkError ? cause.message : 'PDK could not be reached just now.',
+        }
+      }
+    }),
+  )
+
+  const reachable = links.filter((link) => answers.some((a) => a.systemId === link.systemId && a.ok)).length
+  const failure = answers.find((answer) => !answer.ok)
+
+  return {
+    ...status,
+    reachable,
+    needsAttention: reachable === 0 ? (failure?.message ?? 'PDK did not answer.') : null,
   }
 }

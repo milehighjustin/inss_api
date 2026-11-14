@@ -35,6 +35,7 @@ import {
 export const adminUserRoutes = new Hono()
 
 export const ASSIGNABLE_ROLES = [
+  'access',
   'administrator',
   'developer',
   'investor',

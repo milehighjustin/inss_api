@@ -1,5 +1,5 @@
-import { PdkError, pdkGet, pdkPost, pdkSystem, type PdkCloudNode } from './api.ts'
-import { readSelectedSystem } from './store.ts'
+import { PdkError, pdkGet, pdkPost, type PdkCloudNode } from './api.ts'
+import { readLocationSystem } from './links.ts'
 
 /**
  * Doors, which PDK calls devices.
@@ -53,25 +53,34 @@ function nodeNameOf(value: PdkDevice['cloudNode']): string | null {
   return value.name ?? value.serialNumber ?? null
 }
 
-/** The chosen system, or a 409 that tells the app what to do about it. */
-export async function selectedSystemId(): Promise<string> {
-  const selected = await readSelectedSystem()
-  if (!selected) {
-    throw new PdkError('No PDK system is selected. Choose one in Integrations → PDK.', 'no_system')
+/**
+ * The system a property is linked to, or a 409 that says what to do about it.
+ *
+ * PDK systems are per site, so every door and holder call starts from a property:
+ * the link is what decides which system answers, and a property without one is
+ * a property nobody has set up yet, not an app-wide failure.
+ */
+export async function systemIdForLocation(locationId: string): Promise<string> {
+  const link = await readLocationSystem(locationId)
+  if (!link) {
+    throw new PdkError(
+      'This property has no PDK system linked. An administrator can link one in Admin → Integrations → PDK.',
+      'no_system',
+    )
   }
-  return selected.systemId
+  return link.systemId
 }
 
 /**
- * Every door on the chosen system, with its current state where the node
+ * Every door on one property's system, with its current state where the node
  * answered.
  *
  * `per_page=100` is PDK's maximum: a site with more doors than that needs
  * pagination, and the caller is told the total so it can say so rather than
  * quietly showing a hundred.
  */
-export async function listDoors(): Promise<{ doors: Door[]; total: number | null }> {
-  const systemId = await selectedSystemId()
+export async function listDoors(locationId: string): Promise<{ doors: Door[]; total: number | null }> {
+  const systemId = await systemIdForLocation(locationId)
   const devices = await pdkGet<PdkDevice[]>(systemId, '/devices?per_page=100&include=cloudNode')
   const rows = Array.isArray(devices.data) ? devices.data : []
 
@@ -120,8 +129,8 @@ export async function listDoors(): Promise<{ doors: Door[]; total: number | null
  * a door id, and a request must not be able to point PDK at another node's
  * device. PDK answers 204, which is the whole reply.
  */
-export async function openDoor(deviceId: string): Promise<void> {
-  const systemId = await selectedSystemId()
+export async function openDoor(locationId: string, deviceId: string): Promise<void> {
+  const systemId = await systemIdForLocation(locationId)
   const devices = await pdkGet<PdkDevice[]>(systemId, `/devices?ids=${encodeURIComponent(deviceId)}`)
   const device = (Array.isArray(devices.data) ? devices.data : []).find(
     (row) => row.id === deviceId,

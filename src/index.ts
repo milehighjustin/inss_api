@@ -13,6 +13,7 @@ import {
   adminNotificationRoutes,
   notificationTagRoutes,
 } from './routes/adminNotifications.ts'
+import { accessRoutes } from './routes/access.ts'
 import { adminUserRoutes } from './routes/adminUsers.ts'
 import { alertRoutes, performanceRoutes } from './routes/activity.ts'
 import { adminInvestmentRoutes, adminInvestorRoutes } from './routes/investorAdmin.ts'
@@ -73,6 +74,7 @@ app.route('/api/mobile/auth', authRoutes)
 app.route('/api/mobile/admin/users', adminUserRoutes)
 app.route('/api/mobile/admin/integrations', integrationRoutes)
 app.route('/api/mobile/kpi', kpiRoutes)
+app.route('/api/mobile/access', accessRoutes)
 app.route('/api/mobile/investor', investorRoutes)
 app.route('/api/mobile/pdf', pdfRoutes)
 

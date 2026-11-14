@@ -28,12 +28,18 @@ import { refreshRtcDevices } from '../rtcSignaling.ts'
 
 export const rtcRoutes = new Hono()
 
-/** GET /api/mobile/admin/rtc/devices — active devices, by name. */
+/**
+ * GET /api/mobile/admin/rtc/devices — active devices, by name.
+ *
+ * `?includeInactive=1` adds the deactivated ones, which the console lists so a
+ * device retired by mistake can be brought back. Everything else (the kiosk
+ * player, the placement pickers) leaves them out.
+ */
 rtcRoutes.get('/devices', async (c) => {
   const user = await requireAdmin(c)
   if (user instanceof Response) return user
 
-  return c.json({ devices: await rtcDevices() })
+  return c.json({ devices: await rtcDevices(c.req.query('includeInactive') === '1') })
 })
 
 /** GET /api/mobile/admin/rtc/devices/:deviceId — with its playlist. */

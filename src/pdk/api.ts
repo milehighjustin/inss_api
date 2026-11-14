@@ -8,9 +8,9 @@ import { requireEnv } from '../env.ts'
  * token (`client_credentials`), and that ID token buys a token for one system.
  * The system token is what every door, holder and command call carries.
  *
- * **Which system is a choice, not deployment config.** A dealer's API client can
- * reach several customers, so the system id lives in the app (`pdk/store.ts`),
- * picked by an administrator from the list PDK hands back. Only the client id and
+ * **Which system is a per-property link, not deployment config.** A dealer's API
+ * client can reach several customers, and a PDK system is a site, so each
+ * property is linked to its own system (`pdk/links.ts`). Only the client id and
  * secret — the identity of this application to PDK — stay in the environment.
  *
  * Tokens are short-lived, so they are cached per system and minted again when

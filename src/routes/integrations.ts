@@ -1,10 +1,9 @@
 import { Hono } from 'hono'
 
+import { adminLocation } from '../adminLocations.ts'
 import { requireAdmin } from '../auth/session.ts'
 import { PdkError, confirmSystem, listSystems } from '../pdk/api.ts'
-import { listDoors, openDoor } from '../pdk/doors.ts'
-import { listHolders } from '../pdk/holders.ts'
-import { clearSelectedSystem, saveSelectedSystem } from '../pdk/store.ts'
+import { clearLocationSystem, listLocationSystems, saveLocationSystem } from '../pdk/links.ts'
 import { pdkStatus } from '../pdk/status.ts'
 import { authorizeUrl, mintState, STATE_EXPIRES_SECONDS } from '../quickbooks/oauth.ts'
 import { quickBooksStatus } from '../quickbooks/status.ts'
@@ -21,9 +20,9 @@ import { quickBooksStatus } from '../quickbooks/status.ts'
  *
  * - **QuickBooks** is a browser errand. The API hands back an authorize URL, an
  *   administrator signs in to Intuit, and the callback stores the tokens.
- * - **PDK** is deployment configuration. The API client credentials live in the
- *   server's environment, so there is nothing for an administrator to click —
- *   the page reads status live and, when it works, the doors.
+ * - **PDK** is deployment configuration plus a per-property link. The API client
+ *   credentials live in the server's environment; which system a property uses is
+ *   a choice, and there is one per property because a PDK system is a site.
  */
 
 export const integrationRoutes = new Hono()
@@ -60,9 +59,12 @@ integrationRoutes.get('/', async (c) => {
       {
         id: 'pdk',
         name: 'PDK Access Control',
-        summary: 'Doors · holders · who opened what, when',
-        connected: pdk?.connected === true,
-        detail: pdk?.systemName ?? null,
+        summary: 'Doors · holders · gates and access per property',
+        connected: (pdk?.reachable ?? 0) > 0,
+        detail:
+          pdk && pdk.linked > 0
+            ? `${pdk.reachable} of ${pdk.linked} linked propert${pdk.linked === 1 ? 'y' : 'ies'} answering`
+            : null,
         needsAttention: pdk ? pdk.needsAttention : 'PDK could not be checked just now.',
         checkedAt: pdk?.checkedAt ?? new Date().toISOString(),
       },
@@ -135,8 +137,7 @@ function pdkFailure(cause: unknown) {
  *
  * Success: { integration: PdkStatus }
  *
- * The system, and how much is on it. `needsAttention` says what to fix when the
- * credentials are missing or refused.
+ * How many properties are linked, and how many of their systems answered.
  */
 integrationRoutes.get('/pdk', async (c) => {
   const gate = await requireAdmin(c)
@@ -150,9 +151,9 @@ integrationRoutes.get('/pdk', async (c) => {
  *
  * Success: { systems: [{ systemId, name, organizationId, cloudNodes }] }
  *
- * The systems this API client can reach, so an administrator can pick one in the
- * app instead of copying an id into a deployment variable. PDK answers this from
- * the organizations the client belongs to.
+ * The systems this API client can reach, so a property can be pointed at one in
+ * the app instead of copying an id into a deployment variable. PDK answers this
+ * from the organizations the client belongs to.
  */
 integrationRoutes.get('/pdk/systems', async (c) => {
   const gate = await requireAdmin(c)
@@ -167,29 +168,55 @@ integrationRoutes.get('/pdk/systems', async (c) => {
 })
 
 /**
- * POST /api/mobile/admin/integrations/pdk/system
+ * GET /api/mobile/admin/integrations/pdk/links
  *
- * Body: { systemId }
- * Success: { integration: PdkStatus }
+ * Success: { links: [{ locationId, systemId, systemName, organizationId, linkedBy, linkedAt }] }
  *
- * The choice is confirmed against PDK before it is stored, so a typo or a system
- * the client cannot reach is refused here rather than showing as connected and
- * failing on the first door. It is a choice, not a credential: the client secret
- * stays in the environment.
+ * Which property uses which system. The property names are the app's to add —
+ * this is the association, and nothing else.
  */
-integrationRoutes.post('/pdk/system', async (c) => {
+integrationRoutes.get('/pdk/links', async (c) => {
   const gate = await requireAdmin(c)
   if (gate instanceof Response) return gate
 
-  const body = (await c.req.json().catch(() => null)) as { systemId?: unknown } | null
+  return c.json({ links: await listLocationSystems() })
+})
+
+/**
+ * POST /api/mobile/admin/integrations/pdk/links
+ *
+ * Body: { locationId, systemId }
+ * Success: { link }
+ *
+ * The system is confirmed with PDK before it is stored, so a system this client
+ * cannot reach is refused here rather than looking linked until the first door.
+ * Linking a property that already has one replaces it — a site has one system.
+ */
+integrationRoutes.post('/pdk/links', async (c) => {
+  const gate = await requireAdmin(c)
+  if (gate instanceof Response) return gate
+
+  const body = (await c.req.json().catch(() => null)) as
+    | { locationId?: unknown; systemId?: unknown }
+    | null
+  const locationId = typeof body?.locationId === 'string' ? body.locationId.trim() : ''
   const systemId = typeof body?.systemId === 'string' ? body.systemId.trim() : ''
+
+  if (!locationId) return c.json({ error: 'Choose a property.' }, 400)
   if (!systemId) return c.json({ error: 'Choose a PDK system.' }, 400)
+
+  const location = await adminLocation(locationId)
+  if (!location) return c.json({ error: 'That property is not there.' }, 404)
 
   try {
     const system = await confirmSystem(systemId)
-    await saveSelectedSystem({ ...system, selectedBy: gate.userId })
-    console.log('[pdk] system selected', { systemId, by: gate.userId })
-    return c.json({ integration: await pdkStatus() })
+    const link = await saveLocationSystem({
+      locationId,
+      ...system,
+      linkedBy: gate.userId,
+    })
+    console.log('[pdk] property linked', { locationId, systemId, by: gate.userId })
+    return c.json({ link }, 201)
   } catch (cause) {
     const failure = pdkFailure(cause)
     return c.json({ error: failure.message }, failure.status)
@@ -197,81 +224,17 @@ integrationRoutes.post('/pdk/system', async (c) => {
 })
 
 /**
- * DELETE /api/mobile/admin/integrations/pdk/system
- *
- * Success: { integration: PdkStatus }
- *
- * Forgets the choice. The API client credentials are untouched, so another
- * system can be picked straight away.
- */
-integrationRoutes.delete('/pdk/system', async (c) => {
-  const gate = await requireAdmin(c)
-  if (gate instanceof Response) return gate
-
-  await clearSelectedSystem()
-  console.log('[pdk] system selection cleared', { by: gate.userId })
-  return c.json({ integration: await pdkStatus() })
-})
-
-/**
- * GET /api/mobile/admin/integrations/pdk/doors
- *
- * Success: { doors, total }
- *
- * Each door carries its cloud node and, when the node answered, its state.
- */
-integrationRoutes.get('/pdk/doors', async (c) => {
-  const gate = await requireAdmin(c)
-  if (gate instanceof Response) return gate
-
-  try {
-    const { doors, total } = await listDoors()
-    return c.json({ doors, total })
-  } catch (cause) {
-    const failure = pdkFailure(cause)
-    return c.json({ error: failure.message }, failure.status)
-  }
-})
-
-/**
- * POST /api/mobile/admin/integrations/pdk/doors/:deviceId/open
+ * DELETE /api/mobile/admin/integrations/pdk/links/:locationId
  *
  * Success: { ok: true }
  *
- * The node is taken from the device PDK returns, never from the request, so the
- * app can only open doors that are on this system.
+ * Unlinks the property. The PDK system, its doors and its holders are untouched.
  */
-integrationRoutes.post('/pdk/doors/:deviceId/open', async (c) => {
+integrationRoutes.delete('/pdk/links/:locationId', async (c) => {
   const gate = await requireAdmin(c)
   if (gate instanceof Response) return gate
 
-  try {
-    await openDoor(c.req.param('deviceId'))
-    console.log('[pdk] door opened', { deviceId: c.req.param('deviceId'), by: gate.userId })
-    return c.json({ ok: true })
-  } catch (cause) {
-    const failure = pdkFailure(cause)
-    return c.json({ error: failure.message }, failure.status)
-  }
-})
-
-/**
- * GET /api/mobile/admin/integrations/pdk/holders?search=
- *
- * Success: { holders, total }
- *
- * The read side only: access is granted in pdk.io, and a second place to edit it
- * would be a second place to get it wrong.
- */
-integrationRoutes.get('/pdk/holders', async (c) => {
-  const gate = await requireAdmin(c)
-  if (gate instanceof Response) return gate
-
-  try {
-    const { holders, total } = await listHolders(c.req.query('search') ?? '')
-    return c.json({ holders, total })
-  } catch (cause) {
-    const failure = pdkFailure(cause)
-    return c.json({ error: failure.message }, failure.status)
-  }
+  await clearLocationSystem(c.req.param('locationId'))
+  console.log('[pdk] property unlinked', { locationId: c.req.param('locationId'), by: gate.userId })
+  return c.json({ ok: true })
 })

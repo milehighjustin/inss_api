@@ -4,14 +4,22 @@ import { adminLocations } from '../adminLocations.ts'
 import { requireRoles, type SessionUser } from '../auth/session.ts'
 import { PdkError } from '../pdk/api.ts'
 import { listDoors, openDoor } from '../pdk/doors.ts'
-import { createHolder, listHolders } from '../pdk/holders.ts'
+import {
+  createHolder,
+  getHolder,
+  listGroups,
+  listHolders,
+  listPartitions,
+  updateHolder,
+  type HolderInput,
+} from '../pdk/holders.ts'
 import { listLocationSystems } from '../pdk/links.ts'
 
 /**
  * Access Management.
  *
  * The screens behind the `access` role: the properties that have a PDK system,
- * their gates, and their holders. This is deliberately not part of Admin — the
+ * their gates, their holders. This is deliberately not part of Admin — the
  * person at the desk who buzzes a tenant in is not editing the integration, and
  * the person who links a property is not opening gates at midnight. Both reach
  * the same PDK systems through different doors.
@@ -132,43 +140,135 @@ accessRoutes.get('/:locationId/holders', async (c) => {
 })
 
 /**
+ * GET /api/mobile/access/:locationId/partitions and /groups
+ *
+ * Success: { partitions } / { groups }
+ *
+ * The two lists the holder editor needs: PDK files every holder under a
+ * partition, and groups are what carry shared rules.
+ */
+accessRoutes.get('/:locationId/partitions', async (c) => {
+  const user = await gate(c)
+  if (user instanceof Response) return user
+
+  try {
+    return c.json({ partitions: await listPartitions(c.req.param('locationId')) })
+  } catch (cause) {
+    const failure = pdkFailure(cause)
+    return c.json({ error: failure.message }, failure.status)
+  }
+})
+
+accessRoutes.get('/:locationId/groups', async (c) => {
+  const user = await gate(c)
+  if (user instanceof Response) return user
+
+  try {
+    return c.json({ groups: await listGroups(c.req.param('locationId')) })
+  } catch (cause) {
+    const failure = pdkFailure(cause)
+    return c.json({ error: failure.message }, failure.status)
+  }
+})
+
+/** GET /api/mobile/access/:locationId/holders/:holderId — Success: { holder } */
+accessRoutes.get('/:locationId/holders/:holderId', async (c) => {
+  const user = await gate(c)
+  if (user instanceof Response) return user
+
+  try {
+    const holder = await getHolder(c.req.param('locationId'), c.req.param('holderId'))
+    return c.json({ holder })
+  } catch (cause) {
+    const failure = pdkFailure(cause)
+    return c.json({ error: failure.message }, failure.status)
+  }
+})
+
+/** A holder body, or the sentence saying what is wrong with it. */
+function readHolderInput(body: unknown): HolderInput | string {
+  const raw = (body ?? {}) as Record<string, unknown>
+  const text = (value: unknown) => (typeof value === 'string' ? value.trim() : '')
+
+  const firstName = text(raw.firstName)
+  const lastName = text(raw.lastName)
+  if (!firstName || !lastName) return 'A holder needs a first and a last name.'
+
+  const enabled = typeof raw.enabled === 'boolean' ? raw.enabled : true
+  const groupIds = Array.isArray(raw.groupIds)
+    ? raw.groupIds.filter((id): id is string => typeof id === 'string' && Boolean(id))
+    : []
+
+  return {
+    firstName,
+    lastName,
+    email: text(raw.email) || null,
+    partitionId: text(raw.partitionId) || null,
+    enabled,
+    activeDate: text(raw.activeDate) || null,
+    expireDate: text(raw.expireDate) || null,
+    pin: text(raw.pin) || null,
+    duressPin: text(raw.duressPin) || null,
+    groupIds,
+  }
+}
+
+/**
  * POST /api/mobile/access/:locationId/holders
  *
- * Body: { firstName, lastName, email? }
+ * Body: { firstName, lastName, email?, partitionId?, activeDate?, expireDate?,
+ *         pin?, duressPin?, groupIds? }
  * Success: { holder }
  *
- * A new tenant needs a holder before their gate works, and going to pdk.io for
- * it meant leaving the screen someone was already using. A PDK holder has no
- * phone field, so none is accepted.
+ * Everything PDK lets you set on a holder at creation, because a tenant's gate
+ * code is issued here or not at all.
  */
 accessRoutes.post('/:locationId/holders', async (c) => {
   const user = await gate(c)
   if (user instanceof Response) return user
 
-  const body = (await c.req.json().catch(() => null)) as
-    | { firstName?: unknown; lastName?: unknown; email?: unknown }
-    | null
-
-  const firstName = typeof body?.firstName === 'string' ? body.firstName.trim() : ''
-  const lastName = typeof body?.lastName === 'string' ? body.lastName.trim() : ''
-  const email = typeof body?.email === 'string' ? body.email.trim() : ''
-
-  if (!firstName || !lastName) {
-    return c.json({ error: 'A holder needs a first and a last name.' }, 400)
-  }
+  const parsed = readHolderInput(await c.req.json().catch(() => null))
+  if (typeof parsed === 'string') return c.json({ error: parsed }, 400)
 
   try {
-    const holder = await createHolder(c.req.param('locationId'), {
-      firstName,
-      lastName,
-      email: email || null,
-    })
+    const holder = await createHolder(c.req.param('locationId'), parsed)
     console.log('[pdk] holder added', {
       locationId: c.req.param('locationId'),
       holderId: holder.id,
       by: user.userId,
     })
     return c.json({ holder }, 201)
+  } catch (cause) {
+    const failure = pdkFailure(cause)
+    return c.json({ error: failure.message }, failure.status)
+  }
+})
+
+/**
+ * PUT /api/mobile/access/:locationId/holders/:holderId
+ *
+ * Body: the same fields as the create.
+ * Success: { holder }
+ *
+ * A replacement, as PDK's update is: the editor starts from the holder as it
+ * stands, so what it sends is the whole record and nothing is cleared by
+ * omission.
+ */
+accessRoutes.put('/:locationId/holders/:holderId', async (c) => {
+  const user = await gate(c)
+  if (user instanceof Response) return user
+
+  const parsed = readHolderInput(await c.req.json().catch(() => null))
+  if (typeof parsed === 'string') return c.json({ error: parsed }, 400)
+
+  try {
+    const holder = await updateHolder(c.req.param('locationId'), c.req.param('holderId'), parsed)
+    console.log('[pdk] holder changed', {
+      locationId: c.req.param('locationId'),
+      holderId: c.req.param('holderId'),
+      by: user.userId,
+    })
+    return c.json({ holder })
   } catch (cause) {
     const failure = pdkFailure(cause)
     return c.json({ error: failure.message }, failure.status)

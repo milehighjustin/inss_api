@@ -253,6 +253,11 @@ export function pdkPost<T>(systemId: string, path: string, body?: unknown): Prom
   return systemRequest<T>(systemId, path, { method: 'POST', body })
 }
 
+/** PDK's replacements (a holder, a holder's groups) are PUTs that answer 204. */
+export function pdkPut<T>(systemId: string, path: string, body?: unknown): Promise<PdkResult<T>> {
+  return systemRequest<T>(systemId, path, { method: 'PUT', body })
+}
+
 export interface PdkCloudNode {
   id: string
   name?: string

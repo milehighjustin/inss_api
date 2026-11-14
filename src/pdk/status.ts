@@ -1,4 +1,4 @@
-import { PdkError, pdkConfigured, pdkSystem } from './api.ts'
+import { PdkError, pdkCloudNodes, pdkConfigured } from './api.ts'
 import { listLocationSystems } from './links.ts'
 
 /**
@@ -11,10 +11,11 @@ import { listLocationSystems } from './links.ts'
  * - **linked** — how many properties have been pointed at a PDK system. That is
  *   a choice in the app, made per property.
  *
- * `reachable` is read live: each distinct system is fetched once, so a green
- * light means PDK actually answered for it. A panel that says "connected"
- * because a document exists is a panel that lies the first time a credential is
- * rotated.
+ * `reachable` is read live: each distinct system is asked for its cloud nodes
+ * once, so a green light means a system token was issued and the gates endpoint
+ * answered — the same two hops opening a door takes. Asking for the system
+ * itself was the obvious check, but PDK v2 has no such endpoint and answers 404,
+ * which read as a broken link when nothing was broken.
  */
 
 export interface PdkStatus {
@@ -65,7 +66,7 @@ export async function pdkStatus(): Promise<PdkStatus> {
   const answers = await Promise.all(
     systemIds.map(async (systemId) => {
       try {
-        await pdkSystem(systemId)
+        await pdkCloudNodes(systemId)
         return { systemId, ok: true as const, message: null }
       } catch (cause) {
         return {

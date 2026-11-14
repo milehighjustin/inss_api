@@ -253,19 +253,6 @@ export function pdkPost<T>(systemId: string, path: string, body?: unknown): Prom
   return systemRequest<T>(systemId, path, { method: 'POST', body })
 }
 
-export interface PdkSystem {
-  id?: string
-  name?: string
-  ouId?: string
-  timeZone?: string
-  [key: string]: unknown
-}
-
-/** The system itself — the cheapest proof the credentials and the choice work. */
-export function pdkSystem(systemId: string): Promise<PdkResult<PdkSystem>> {
-  return systemRequest<PdkSystem>(systemId, `/${systemId}`)
-}
-
 export interface PdkCloudNode {
   id: string
   name?: string
@@ -344,20 +331,34 @@ export async function listSystems(): Promise<PdkSystemChoice[]> {
   return [...choices.values()].sort((left, right) => left.name.localeCompare(right.name))
 }
 
-/** A chosen system, confirmed against PDK before it is stored. */
+/**
+ * A chosen system, confirmed against PDK before it is stored.
+ *
+ * The confirmation is a lookup in the list the picker was filled from, not a
+ * separate "get system" call: PDK v2 has no endpoint for one system, and asking
+ * for one answered 404 — which the panel then reported as "PDK could not find
+ * that record" while every other call for that same system worked. Checking the
+ * list is also the stronger test, because it proves the client can *see* the
+ * system, which is what every door and holder call will need.
+ */
 export async function confirmSystem(systemId: string): Promise<{
   systemId: string
   systemName: string
   organizationId: string | null
 }> {
-  const system = await pdkSystem(systemId)
-  if (!system.data || typeof system.data !== 'object') {
-    throw new PdkError('PDK did not describe that system.', 'not_found')
+  const systems = await listSystems()
+  const match = systems.find((system) => system.systemId === systemId)
+
+  if (!match) {
+    throw new PdkError(
+      'PDK does not list that system for this API client. Check the client’s organizations in pdk.io, then reload this page.',
+      'not_found',
+    )
   }
 
   return {
-    systemId,
-    systemName: system.data.name ?? 'PDK system',
-    organizationId: typeof system.data.ouId === 'string' ? system.data.ouId : null,
+    systemId: match.systemId,
+    systemName: match.name,
+    organizationId: match.organizationId,
   }
 }

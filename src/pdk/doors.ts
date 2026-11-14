@@ -125,30 +125,27 @@ export async function listDoors(locationId: string): Promise<{ doors: Door[]; to
 /**
  * Open one door now.
  *
- * The node id comes from the device itself, never from the caller: the app knows
- * a door id, and a request must not be able to point PDK at another node's
- * device. PDK answers 204, which is the whole reply.
+ * A device is addressed under its cloud node, so the node id has to be resolved
+ * from PDK first — and it comes from PDK's own record, never from the caller: the
+ * app knows a door id, and a request must not be able to point PDK at another
+ * node's device. The lookup asks for `include=cloudNode` because that is the
+ * only place the node comes back; there is no get-device-by-id endpoint outside
+ * a node. PDK answers 204, which is the whole reply.
  */
 export async function openDoor(locationId: string, deviceId: string): Promise<void> {
   const systemId = await systemIdForLocation(locationId)
-  const devices = await pdkGet<PdkDevice[]>(systemId, `/devices?ids=${encodeURIComponent(deviceId)}`)
+  const devices = await pdkGet<PdkDevice[]>(
+    systemId,
+    `/devices?ids=${encodeURIComponent(deviceId)}&include=cloudNode`,
+  )
   const device = (Array.isArray(devices.data) ? devices.data : []).find(
     (row) => row.id === deviceId,
   )
 
-  if (!device) throw new PdkError('That door is not on the selected PDK system.', 'not_found')
+  if (!device) throw new PdkError('That door is not on this property’s PDK system.', 'not_found')
 
-  let cloudNodeId = nodeIdOf(device.cloudNode)
-  if (!cloudNodeId) {
-    // `include=cloudNode` was not requested on the lookup, so ask for the device
-    // again with it rather than guessing which node to command.
-    const detailed = await pdkGet<PdkDevice>(
-      systemId,
-      `/devices/${encodeURIComponent(deviceId)}?include=cloudNode`,
-    )
-    cloudNodeId = nodeIdOf(detailed.data.cloudNode)
-    if (!cloudNodeId) throw new PdkError('That door is not attached to a cloud node.', 'unavailable')
-  }
+  const cloudNodeId = nodeIdOf(device.cloudNode)
+  if (!cloudNodeId) throw new PdkError('That door is not attached to a cloud node.', 'unavailable')
 
   await pdkPost(systemId, `/cloud-nodes/${cloudNodeId}/devices/${encodeURIComponent(deviceId)}/open`)
 }

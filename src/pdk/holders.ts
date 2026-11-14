@@ -77,16 +77,18 @@ export interface NewHolder {
   firstName: string
   lastName: string
   email: string | null
-  phone: string | null
 }
 
 /**
  * Adds a holder to one property's system.
  *
- * PDK answers a creation with the holder it made, but not every version does
- * (some answer 201 with an id, some with nothing), so a missing body falls back
- * to asking for the person back by email rather than reporting a failure that
- * did not happen.
+ * PDK's reply to a creation is an id and nothing else, so the person is read
+ * back once by that id: the screen that just added someone wants to show them in
+ * the list, and a row reading "Unnamed holder" would look like the save half
+ * failed. If that read fails, the holder is described from what was sent — the
+ * creation itself succeeded, and saying otherwise would invite a duplicate.
+ *
+ * There is no phone field on a PDK holder, so none is sent.
  */
 export async function createHolder(locationId: string, input: NewHolder): Promise<Holder> {
   if (!input.firstName || !input.lastName) {
@@ -94,29 +96,37 @@ export async function createHolder(locationId: string, input: NewHolder): Promis
   }
 
   const systemId = await systemIdForLocation(locationId)
-  const created = await pdkPost<PdkHolder>(systemId, '/holders', {
+  const created = await pdkPost<{ id?: string }>(systemId, '/holders', {
     firstName: input.firstName,
     lastName: input.lastName,
     ...(input.email ? { email: input.email } : {}),
-    ...(input.phone ? { phone: input.phone } : {}),
     enabled: true,
   })
 
-  const payload = created.data
-  if (payload && typeof payload === 'object' && typeof payload.id === 'string' && payload.id) {
-    return toHolder(payload)
+  const id =
+    created.data && typeof created.data === 'object' && typeof created.data.id === 'string'
+      ? created.data.id
+      : null
+
+  if (id) {
+    try {
+      const saved = await pdkGet<PdkHolder>(systemId, `/holders/${id}`)
+      if (saved.data && typeof saved.data === 'object') return toHolder(saved.data)
+    } catch (cause) {
+      console.error('[pdk] could not read back the new holder', {
+        id,
+        message: cause instanceof Error ? cause.message : String(cause),
+      })
+    }
   }
 
-  if (!input.email) {
-    throw new PdkError('PDK added the holder but did not return it.', 'unavailable')
+  return {
+    id: id ?? '',
+    name: `${input.firstName} ${input.lastName}`.trim(),
+    email: input.email,
+    enabled: true,
+    expireDate: null,
+    groups: [],
+    credentials: 0,
   }
-
-  const search = encodeURIComponent(input.email)
-  const found = await pdkGet<PdkHolder[]>(systemId, `/holders?per_page=10&search=${search}`)
-  const match = (Array.isArray(found.data) ? found.data : []).find(
-    (row) => (row.email ?? '').toLowerCase() === input.email?.toLowerCase(),
-  )
-
-  if (!match) throw new PdkError('PDK added the holder but did not return it.', 'unavailable')
-  return toHolder(match)
 }

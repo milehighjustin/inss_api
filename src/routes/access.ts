@@ -134,24 +134,24 @@ accessRoutes.get('/:locationId/holders', async (c) => {
 /**
  * POST /api/mobile/access/:locationId/holders
  *
- * Body: { firstName, lastName, email?, phone? }
+ * Body: { firstName, lastName, email? }
  * Success: { holder }
  *
  * A new tenant needs a holder before their gate works, and going to pdk.io for
- * it meant leaving the screen someone was already using.
+ * it meant leaving the screen someone was already using. A PDK holder has no
+ * phone field, so none is accepted.
  */
 accessRoutes.post('/:locationId/holders', async (c) => {
   const user = await gate(c)
   if (user instanceof Response) return user
 
   const body = (await c.req.json().catch(() => null)) as
-    | { firstName?: unknown; lastName?: unknown; email?: unknown; phone?: unknown }
+    | { firstName?: unknown; lastName?: unknown; email?: unknown }
     | null
 
   const firstName = typeof body?.firstName === 'string' ? body.firstName.trim() : ''
   const lastName = typeof body?.lastName === 'string' ? body.lastName.trim() : ''
   const email = typeof body?.email === 'string' ? body.email.trim() : ''
-  const phone = typeof body?.phone === 'string' ? body.phone.trim() : ''
 
   if (!firstName || !lastName) {
     return c.json({ error: 'A holder needs a first and a last name.' }, 400)
@@ -162,7 +162,6 @@ accessRoutes.post('/:locationId/holders', async (c) => {
       firstName,
       lastName,
       email: email || null,
-      phone: phone || null,
     })
     console.log('[pdk] holder added', {
       locationId: c.req.param('locationId'),
